@@ -183,6 +183,20 @@ class Decoder(nn.Module):
                 attn_mask = attn_mask.repeat_interleave(self.n_heads, dim=0)
 
         # print(attn_mask)
+        if not hasattr(self, "_mask_debug_done"):
+            self._mask_debug_done = True  # Print only once
+            if tgt_mask is not None:
+                print("\n=== Attention Mask Debug ===")
+                print("tgt_mask shape:", tgt_mask.shape)
+                print("Sample tgt_mask[0]:\n", tgt_mask[0].int().cpu().numpy())
+
+                if 'attn_mask' in locals() and attn_mask is not None:
+                    print("attn_mask shape:", attn_mask.shape)
+                    # Print first head’s mask
+                    num_heads = self.n_heads
+                    seq_len = tgt_mask.shape[-1]
+                    first_head_mask = attn_mask[:seq_len, :seq_len].cpu().numpy()
+                    print("attn_mask (first head) [0:5,0:5]:\n", first_head_mask[:5, :5])
 
         self_attn_out, _ = self.self_attention(
             query=x_n,
@@ -239,98 +253,210 @@ class ProjectionHead(nn.Module):
 class ContrastiveEncoder(nn.Module):
     def __init__(self, in_channels=3, emb_size=128):
         super().__init__()
-        self.convnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)  # ResNet18 with ResNet18 weights
+        self.convnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)  # ResNet18 with ResNet18 weights
         self.convnet.conv1 = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.convnet.fc = nn.Identity()
-        self.projector = ProjectionHead(2048, 1024, emb_size)  # Change 2048 to 512 for ResNet18
+        self.projector = ProjectionHead(512, 1024, emb_size)  # Change 2048 to 512 for ResNet18
 
     def forward(self, x):
         features = self.convnet(x)
         return self.projector(features)
 
+import torch.nn as nn
+
 class SingleImageTransformer(nn.Module):
-    def __init__(self, tgt_seq_len: int = 25, vocab_size: int = 204, d_model: int = 512, 
-                 h: int = 8, N: int = 6, num_labels: int = 105):
-        super(SingleImageTransformer, self).__init__()
+    def __init__(self, tgt_seq_len=25, vocab_size=204, d_model=512, 
+                 h=8, N=6, num_labels=105, dropout=0.1):
+        super().__init__()
         self.tgt_seq_len = tgt_seq_len
         self.vocab_size = vocab_size
         self.d_model = d_model
         self.num_labels = num_labels
+        self.n_heads = h
 
-        # Positional Encoding for encoder and decoder
+        # Embeddings
+        self.tgt_embed = InputEmbeddings(d_model, vocab_size)
+        self.label_embed = LabelEmbedding(d_model, num_labels)
+
+        # Positional encodings
         self.encoder_positional_encoding = PositionalEncoding(d_model, seq_len=2)
         self.decoder_positional_encoding = PositionalEncoding(d_model, seq_len=tgt_seq_len)
-        
-        # Embeddings - FIXED: Use vocab_size for target embedding
-        self.tgt_embed = InputEmbeddings(d_model, vocab_size, bias=False)  # Changed to vocab_size
-        self.label_embed = LabelEmbedding(d_model, num_labels)
-        
-        # Encoder and Decoder
-        self.encoder = nn.ModuleList([Encoder(d_model, h, seq_len=2) for _ in range(N)])
-        self.decoder = nn.ModuleList([Decoder(d_model, h, tgt_seq_len) for _ in range(N)])
 
-        # Projection layer - output vocab probabilities
-        self.projection = nn.Linear(d_model, vocab_size, bias=False)
-        self.projection_norm = RMSNorm(d_model, eps=1e-5)
+        # Swap in PyTorch Transformer encoder/decoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, 
+            nhead=h,
+            dim_feedforward=4*d_model,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True  # closer to your RMSNorm-first design
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=N)
+
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_model,
+            nhead=h,
+            dim_feedforward=4*d_model,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True
+        )
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=N)
+
+        # Projection layer
+        self.projection = nn.Linear(d_model, vocab_size)
 
         # Image encoder
         self.image_encoder = ContrastiveEncoder(in_channels=1, emb_size=d_model)
 
-        # Initialize weights
-        for m in [self.encoder, self.decoder, self.projection, self.tgt_embed, self.label_embed]:
-            m.apply(_init_weights)
-    
-    def encode(self, image_data, labels):
-        # Process image data
-        image_embedding = self.image_encoder(image_data).unsqueeze(1)  # Shape: (batch_size, 1, d_model)
-        
-        # Process labels with embedding layer
-        label_embedding = self.label_embed(labels).unsqueeze(1)  # Shape: (batch_size, 1, d_model)
-
-        # Combine image and label embeddings
+    def encode(self, image_data, labels, src_mask=None):
+        image_embedding = self.image_encoder(image_data).unsqueeze(1)   # (B,1,D)
+        label_embedding = self.label_embed(labels).unsqueeze(1)         # (B,1,D)
         combined_embedding = torch.cat([image_embedding, label_embedding], dim=1)
+        src = self.encoder_positional_encoding(combined_embedding)
+        memory = self.encoder(src, src_key_padding_mask=src_mask)
+        return memory, image_embedding, label_embedding
 
-        # Add positional encoding
-        src = self.encoder_positional_encoding(combined_embedding)  # Shape: (batch_size, 2, d_model)
-
-        # Pass through encoder layers
-        for layer in self.encoder:
-            src = layer(src)
-
-        return src, image_embedding, label_embedding
-
-    def decode(self, encoder_output, src_mask, tgt, tgt_mask):
-        # # Embed the target sequence and add positional encoding
-        # print(f"[DEBUG] Target tensor shape: {tgt.shape}")
-        # print(f"[DEBUG] Target tensor dtype: {tgt.dtype}")
-        # print(f"[DEBUG] Target min value: {tgt.min().item()}")
-        # print(f"[DEBUG] Target max value: {tgt.max().item()}")
-        tgt = self.tgt_embed(tgt)  # Input shape: (batch, seq_len), Output: (batch, seq_len, d_model)
+    def decode(self, memory, tgt, tgt_mask=None, memory_mask=None):
+        tgt = self.tgt_embed(tgt)
         tgt = self.decoder_positional_encoding(tgt)
-
-        # Apply decoder layers
-        for layer in self.decoder:
-            tgt = layer(tgt, encoder_output, src_mask, tgt_mask)
-
-        return tgt
-    
-    def forward(self, decoder_input, decoder_mask, image_data, labels):
-        # decoder_input shape: (batch, seq_len) - token indices
-        # image_data shape: (batch, 3, H, W) - RGB images
-        # labels shape: (batch,) - label indices
         
-        # Encode source input with image and label data
-        encoder_output, image_embedding, label_embedding = self.encode(image_data, labels)
-        
-        # Decoder pass
-        decoder_output = self.decode(
-            encoder_output, 
-            None, 
-            decoder_input, 
-            decoder_mask
+        attn_mask = None
+        if tgt_mask is not None:
+            if tgt_mask.dim() == 3:  # [B, T, T]
+                # Convert to float and set masked positions to -inf
+                attn_mask = torch.zeros_like(tgt_mask, dtype=torch.float)
+                attn_mask.masked_fill_(~tgt_mask, float('-inf'))
+                # Expand for multi-head attention
+                attn_mask = attn_mask.repeat_interleave(self.n_heads, dim=0)
+
+        output = self.decoder(
+            tgt,
+            memory,
+            tgt_mask=attn_mask,
+            memory_mask=memory_mask
         )
-        
-        decoder_output = self.projection_norm(decoder_output)
-        final_output = self.projection(decoder_output)  # Shape: (batch, seq_len, vocab_size)
+        return output
 
-        return final_output, image_embedding, label_embedding
+    def forward(self, decoder_input, decoder_mask, image_data, labels):
+        memory, image_embedding, label_embedding = self.encode(image_data, labels)
+        decoder_output = self.decode(memory, decoder_input, tgt_mask=decoder_mask)
+        logits = self.projection(decoder_output)
+        return logits, image_embedding, label_embedding
+
+# class SingleImageTransformer(nn.Module):
+#     def __init__(self, tgt_seq_len: int = 25, vocab_size: int = 204, d_model: int = 512, 
+#                  h: int = 8, N: int = 6, num_labels: int = 105):
+#         super(SingleImageTransformer, self).__init__()
+#         self.tgt_seq_len = tgt_seq_len
+#         self.vocab_size = vocab_size
+#         self.d_model = d_model
+#         self.num_labels = num_labels
+
+#         # Positional Encoding for encoder and decoder
+#         self.encoder_positional_encoding = PositionalEncoding(d_model, seq_len=2)
+#         self.decoder_positional_encoding = PositionalEncoding(d_model, seq_len=tgt_seq_len)
+        
+#         # Embeddings - FIXED: Use vocab_size for target embedding
+#         self.tgt_embed = InputEmbeddings(d_model, vocab_size, bias=False)  # Changed to vocab_size
+#         self.label_embed = LabelEmbedding(d_model, num_labels)
+        
+#         # Encoder and Decoder
+#         self.encoder = nn.ModuleList([Encoder(d_model, h, seq_len=2) for _ in range(N)])
+#         self.decoder = nn.ModuleList([Decoder(d_model, h, tgt_seq_len) for _ in range(N)])
+
+#         # Projection layer - output vocab probabilities
+#         self.projection = nn.Linear(d_model, vocab_size, bias=False)
+#         self.projection_norm = RMSNorm(d_model, eps=1e-5)
+
+#         # Image encoder
+#         self.image_encoder = ContrastiveEncoder(in_channels=1, emb_size=d_model)
+
+#         # Initialize weights
+#         for m in [self.encoder, self.decoder, self.projection, self.projection_norm, self.tgt_embed, self.label_embed]:
+#             m.apply(_init_weights)
+    
+#     def encode(self, image_data, labels):
+#         print("="*40)
+#         print("[ENCODE] Starting encoding")
+#         print("="*40)
+
+#         # Process image data
+#         print(f"[ENCODE] image_data shape: {image_data.shape}")
+#         image_embedding = self.image_encoder(image_data).unsqueeze(1)  # Shape: (B,1,D)
+#         print(f"[ENCODE] image_embedding shape: {image_embedding.shape}, "
+#               f"mean={image_embedding.mean().item():.6f}, std={image_embedding.std().item():.6f}")
+
+#         # Process labels
+#         print(f"[ENCODE] labels shape: {labels.shape}, dtype={labels.dtype}")
+#         label_embedding = self.label_embed(labels).unsqueeze(1)  # Shape: (B,1,D)
+#         print(f"[ENCODE] label_embedding shape: {label_embedding.shape}, "
+#               f"mean={label_embedding.mean().item():.6f}, std={label_embedding.std().item():.6f}")
+
+#         # Combine
+#         combined_embedding = torch.cat([image_embedding, label_embedding], dim=1)
+#         print(f"[ENCODE] combined_embedding shape: {combined_embedding.shape}")
+
+#         # Positional encoding
+#         src = self.encoder_positional_encoding(combined_embedding)
+#         print(f"[ENCODE] after positional encoding: {src.shape}, "
+#               f"mean={src.mean().item():.6f}, std={src.std().item():.6f}")
+
+#         # Encoder layers
+#         for i, layer in enumerate(self.encoder):
+#             src = layer(src)
+#             print(f"[ENCODE] after encoder layer {i}: {src.shape}, "
+#                   f"mean={src.mean().item():.6f}, std={src.std().item():.6f}")
+
+#         return src, image_embedding, label_embedding
+
+#     def decode(self, encoder_output, src_mask, tgt, tgt_mask):
+#         print("="*40)
+#         print("[DECODE] Starting decoding")
+#         print("="*40)
+
+#         print(f"[DECODE] tgt input shape: {tgt.shape}, dtype={tgt.dtype}")
+#         tgt = self.tgt_embed(tgt)  # (B,T,D)
+#         print(f"[DECODE] after tgt_embed: {tgt.shape}, "
+#               f"mean={tgt.mean().item():.6f}, std={tgt.std().item():.6f}")
+
+#         tgt = self.decoder_positional_encoding(tgt)
+#         print(f"[DECODE] after positional encoding: {tgt.shape}, "
+#               f"mean={tgt.mean().item():.6f}, std={tgt.std().item():.6f}")
+
+#         for i, layer in enumerate(self.decoder):
+#             tgt = layer(tgt, encoder_output, src_mask, tgt_mask)
+#             print(f"[DECODE] after decoder layer {i}: {tgt.shape}, "
+#                   f"mean={tgt.mean().item():.6f}, std={tgt.std().item():.6f}")
+
+#         return tgt
+    
+#     def forward(self, decoder_input, decoder_mask, image_data, labels):
+#         print("="*40)
+#         print("[FORWARD] Starting forward pass")
+#         print("="*40)
+
+#         # Encode
+#         encoder_output, image_embedding, label_embedding = self.encode(image_data, labels)
+#         print(f"[FORWARD] encoder_output shape: {encoder_output.shape}")
+
+#         # Decode
+#         decoder_output = self.decode(
+#             encoder_output,
+#             None,
+#             decoder_input,
+#             decoder_mask
+#         )
+#         print(f"[FORWARD] decoder_output before norm: {decoder_output.shape}, "
+#               f"mean={decoder_output.mean().item():.6f}, std={decoder_output.std().item():.6f}")
+
+#         # Norm + projection
+#         decoder_output = self.projection_norm(decoder_output)
+#         print(f"[FORWARD] decoder_output after norm: {decoder_output.shape}, "
+#               f"mean={decoder_output.mean().item():.6f}, std={decoder_output.std().item():.6f}")
+
+#         final_output = self.projection(decoder_output)
+#         print(f"[FORWARD] final_output logits: {final_output.shape}, "
+#               f"logit-range=({final_output.min().item():.6f}, {final_output.max().item():.6f})")
+
+#         return final_output, image_embedding, label_embedding
