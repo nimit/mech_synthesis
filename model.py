@@ -312,7 +312,7 @@ class SingleImageTransformer(nn.Module):
     def encode(self, image_data, labels, src_mask=None):
         image_embedding = self.image_encoder(image_data).unsqueeze(1)   # (B,1,D)
         label_embedding = self.label_embed(labels).unsqueeze(1)         # (B,1,D)
-        combined_embedding = torch.cat([image_embedding, label_embedding], dim=1)
+        combined_embedding = torch.cat([image_embedding, label_embedding], dim=1) # (B,2,D)
         src = self.encoder_positional_encoding(combined_embedding)
         memory = self.encoder(src, src_key_padding_mask=src_mask)
         return memory, image_embedding, label_embedding
@@ -340,6 +340,7 @@ class SingleImageTransformer(nn.Module):
 
     def forward(self, decoder_input, decoder_mask, image_data, labels):
         memory, image_embedding, label_embedding = self.encode(image_data, labels)
+        # print(decoder_mask)
         decoder_output = self.decode(memory, decoder_input, tgt_mask=decoder_mask)
         logits = self.projection(decoder_output)
         return logits, image_embedding, label_embedding

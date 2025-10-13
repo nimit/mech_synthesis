@@ -217,7 +217,7 @@ def train(checkpoint_path=None, use_strict_resume=False):
     torch.set_float32_matmul_precision('medium')
 
     # Hyperparams
-    batch_size = 512
+    batch_size = 64
     num_epochs = 200
     lr = 1e-4
     clip_loss_weight = 1.0
@@ -233,7 +233,7 @@ def train(checkpoint_path=None, use_strict_resume=False):
     # Dataset (unchanged)
     dataset = BarLinkageDataset(data_dir='/home/anurizada/Documents/processed_dataset')
     
-    dataset = torch.utils.data.Subset(dataset, range(10000))
+    dataset = torch.utils.data.Subset(dataset, range(1000000))
 
     train_size = int(0.8 * len(dataset))
     val_size = len(dataset) - train_size
@@ -254,9 +254,9 @@ def train(checkpoint_path=None, use_strict_resume=False):
     model_config = {
         'tgt_seq_len': seq_len,
         'output_size': vocab_size,
-        'd_model': 1024,
-        'h': 32,
-        'N': 6,
+        'd_model': 512,
+        'h': 8,
+        'N': 1,
         'num_labels': num_labels,
         'vocab_size': vocab_size
     }
@@ -303,7 +303,7 @@ def train(checkpoint_path=None, use_strict_resume=False):
     ], lr=lr, weight_decay=1e-5)
 
     num_warmup_epochs = 10
-    scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_epochs, num_epochs)
+    # scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_epochs, num_epochs)
     best_loss = float("inf")
 
     if checkpoint_path is not None:
@@ -426,7 +426,7 @@ def train(checkpoint_path=None, use_strict_resume=False):
                 pbar.set_postfix({"Loss": total_loss.item(), "Acc": batch_acc.item()})
                 pbar.update(1)
 
-        scheduler.step()
+        # scheduler.step()
 
         avg_train_loss = epoch_loss / len(train_loader)
         avg_train_ce = epoch_ce / len(train_loader)
