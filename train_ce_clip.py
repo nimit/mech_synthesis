@@ -13,7 +13,7 @@ from torch.optim.lr_scheduler import StepLR, LambdaLR
 from tqdm import tqdm
 import wandb
 
-from model import SingleImageTransformer
+from model import SingleImageTransformerCLIP
 from dataset import BarLinkageDataset  # your dataset (unchanged)
 
 # -------------------------
@@ -259,12 +259,13 @@ def train(checkpoint_path=None, use_strict_resume=False):
         'vocab_size': vocab_size
     }
 
-    model = SingleImageTransformer(
+    model = SingleImageTransformerCLIP(
         tgt_seq_len=model_config['tgt_seq_len'],
         d_model=model_config['d_model'],
         h=model_config['h'],
         N=model_config['N'],
-        num_labels=model_config['num_labels']
+        num_labels=model_config['num_labels'],
+        vocab_size=model_config['vocab_size'],
     ).to(device)
 
     total_params = count_parameters(model)

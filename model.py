@@ -210,83 +210,83 @@ class SingleImageTransformer(nn.Module):
         return logits
 
 
-# class SingleImageTransformer(nn.Module):
-#     def __init__(self, tgt_seq_len=25, vocab_size=204, d_model=512, 
-#                  h=8, N=6, num_labels=105, dropout=0.1):
-#         super().__init__()
-#         self.tgt_seq_len = tgt_seq_len
-#         self.vocab_size = vocab_size
-#         self.d_model = d_model
-#         self.num_labels = num_labels
-#         self.n_heads = h
+class SingleImageTransformerCLIP(nn.Module):
+    def __init__(self, tgt_seq_len=25, vocab_size=204, d_model=512, 
+                 h=8, N=6, num_labels=105, dropout=0.1):
+        super().__init__()
+        self.tgt_seq_len = tgt_seq_len
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.num_labels = num_labels
+        self.n_heads = h
 
-#         # Embeddings
-#         self.tgt_embed = InputEmbeddings(d_model, vocab_size)
-#         self.label_embed = LabelEmbedding(d_model, num_labels)
+        # Embeddings
+        self.tgt_embed = InputEmbeddings(d_model, vocab_size)
+        self.label_embed = LabelEmbedding(d_model, num_labels)
 
-#         # Positional encodings
-#         self.encoder_positional_encoding = PositionalEncoding(d_model, seq_len=2)
-#         self.decoder_positional_encoding = PositionalEncoding(d_model, seq_len=tgt_seq_len)
+        # Positional encodings
+        self.encoder_positional_encoding = PositionalEncoding(d_model, seq_len=2)
+        self.decoder_positional_encoding = PositionalEncoding(d_model, seq_len=tgt_seq_len)
 
-#         # Swap in PyTorch Transformer encoder/decoder
-#         encoder_layer = nn.TransformerEncoderLayer(
-#             d_model=d_model, 
-#             nhead=h,
-#             dim_feedforward=4*d_model,
-#             dropout=dropout,
-#             batch_first=True,
-#             norm_first=True  # closer to your RMSNorm-first design
-#         )
-#         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=N)
+        # Swap in PyTorch Transformer encoder/decoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, 
+            nhead=h,
+            dim_feedforward=4*d_model,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True  # closer to your RMSNorm-first design
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=N)
 
-#         decoder_layer = nn.TransformerDecoderLayer(
-#             d_model=d_model,
-#             nhead=h,
-#             dim_feedforward=4*d_model,
-#             dropout=dropout,
-#             batch_first=True,
-#             norm_first=True
-#         )
-#         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=N)
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_model,
+            nhead=h,
+            dim_feedforward=4*d_model,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True
+        )
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=N)
 
-#         # Projection layer
-#         self.projection = nn.Linear(d_model, vocab_size)
+        # Projection layer
+        self.projection = nn.Linear(d_model, vocab_size)
 
-#         # Image encoder
-#         self.image_encoder = ContrastiveEncoder(in_channels=1, emb_size=d_model)
+        # Image encoder
+        self.image_encoder = ContrastiveEncoder(in_channels=1, emb_size=d_model)
 
-#     def encode(self, image_data, labels, src_mask=None):
-#         image_embedding = self.image_encoder(image_data).unsqueeze(1)   # (B,1,D)
-#         label_embedding = self.label_embed(labels).unsqueeze(1)         # (B,1,D)
-#         combined_embedding = torch.cat([image_embedding, label_embedding], dim=1) # (B,2,D)
-#         src = self.encoder_positional_encoding(combined_embedding)
-#         memory = self.encoder(src, src_key_padding_mask=src_mask)
-#         return memory, image_embedding, label_embedding
+    def encode(self, image_data, labels, src_mask=None):
+        image_embedding = self.image_encoder(image_data).unsqueeze(1)   # (B,1,D)
+        label_embedding = self.label_embed(labels).unsqueeze(1)         # (B,1,D)
+        combined_embedding = torch.cat([image_embedding, label_embedding], dim=1) # (B,2,D)
+        src = self.encoder_positional_encoding(combined_embedding)
+        memory = self.encoder(src, src_key_padding_mask=src_mask)
+        return memory, image_embedding, label_embedding
 
-#     def decode(self, memory, tgt, tgt_mask=None, memory_mask=None):
-#         tgt = self.tgt_embed(tgt)
-#         tgt = self.decoder_positional_encoding(tgt)
+    def decode(self, memory, tgt, tgt_mask=None, memory_mask=None):
+        tgt = self.tgt_embed(tgt)
+        tgt = self.decoder_positional_encoding(tgt)
         
-#         attn_mask = None
-#         if tgt_mask is not None:
-#             if tgt_mask.dim() == 3:  # [B, T, T]
-#                 # Convert to float and set masked positions to -inf
-#                 attn_mask = torch.zeros_like(tgt_mask, dtype=torch.float)
-#                 attn_mask.masked_fill_(~tgt_mask, float('-inf'))
-#                 # Expand for multi-head attention
-#                 attn_mask = attn_mask.repeat_interleave(self.n_heads, dim=0)
+        attn_mask = None
+        if tgt_mask is not None:
+            if tgt_mask.dim() == 3:  # [B, T, T]
+                # Convert to float and set masked positions to -inf
+                attn_mask = torch.zeros_like(tgt_mask, dtype=torch.float)
+                attn_mask.masked_fill_(~tgt_mask, float('-inf'))
+                # Expand for multi-head attention
+                attn_mask = attn_mask.repeat_interleave(self.n_heads, dim=0)
 
-#         output = self.decoder(
-#             tgt,
-#             memory,
-#             tgt_mask=attn_mask,
-#             memory_mask=memory_mask
-#         )
-#         return output
+        output = self.decoder(
+            tgt,
+            memory,
+            tgt_mask=attn_mask,
+            memory_mask=memory_mask
+        )
+        return output
 
-#     def forward(self, decoder_input, decoder_mask, image_data, labels):
-#         memory, image_embedding, label_embedding = self.encode(image_data, labels)
-#         # print(decoder_mask)
-#         decoder_output = self.decode(memory, decoder_input, tgt_mask=decoder_mask)
-#         logits = self.projection(decoder_output)
-#         return logits, image_embedding, label_embedding
+    def forward(self, decoder_input, decoder_mask, image_data, labels):
+        memory, image_embedding, label_embedding = self.encode(image_data, labels)
+        # print(decoder_mask)
+        decoder_output = self.decode(memory, decoder_input, tgt_mask=decoder_mask)
+        logits = self.projection(decoder_output)
+        return logits, image_embedding, label_embedding
