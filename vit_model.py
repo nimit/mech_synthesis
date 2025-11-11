@@ -652,6 +652,7 @@ class SingleLatentTransformer(nn.Module):
 
         # Add Gaussian noise during training
         if self.training and self.noise_std > 0:
+            self._dprint(f"[ENCODE] training mode, adding noise std={self.noise_std}")
             latents = latents + self.noise_std * torch.randn_like(latents)
 
         # Project each latent dimension into d_model

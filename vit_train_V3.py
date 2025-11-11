@@ -105,23 +105,6 @@ def save_best_checkpoint(model, optimizer, epoch, best_loss, batch_size, lr, mod
 
 
 # =========================================================
-# Infer vocab size
-# =========================================================
-def compute_vocab_from_dataset(dataset):
-    max_token = -1
-    for i in range(min(len(dataset), 5000)):
-        s = dataset[i]
-        max_token = max(
-            max_token,
-            int(s["decoder_input_discrete"].max().item()),
-            int(s["labels_discrete"].max().item()),
-        )
-    vocab_size = max_token + 1
-    print(f"✅ Detected vocab_size from dataset: {vocab_size}")
-    return vocab_size
-
-
-# =========================================================
 # Training
 # =========================================================
 def train(checkpoint_path=None, use_strict_resume=False):
@@ -147,8 +130,8 @@ def train(checkpoint_path=None, use_strict_resume=False):
 
     # ----------------- Dataset -----------------
     dataset = BarLinkageDataset(data_dir="/home/anurizada/Documents/processed_dataset_17")
-    vocab_size = compute_vocab_from_dataset(dataset)
-    print(vocab_size)
+    vocab_size = 201
+
     train_size = int(0.8 * len(dataset))
     val_size = len(dataset) - train_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
@@ -162,8 +145,8 @@ def train(checkpoint_path=None, use_strict_resume=False):
     # ----------------- Model -----------------
     model_config = {
         "tgt_seq_len": seq_len,
-        "d_model": 2048,
-        "h": 32,
+        "d_model": 512,
+        "h": 8,
         "N": 6,
         "num_labels": NUM_MECH_TYPES,
         "vocab_size": vocab_size + NUM_SPECIAL_TOKENS,
