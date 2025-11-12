@@ -247,6 +247,7 @@ class SingleImageTransformerCLIP_LLaMA(nn.Module):
 
         # Attention mask: all ones (no padding, LLaMA will apply causal masking internally)
         attention_mask = torch.ones(B_full, L_full, dtype=torch.long, device=device)
+        self._dprint(f"[DECODE] attention_mask: {attention_mask.shape}")
 
         # Run through LLaMA decoder stack
         outputs = self.llama(

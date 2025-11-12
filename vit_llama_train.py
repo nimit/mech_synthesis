@@ -113,9 +113,9 @@ def train(checkpoint_path=None, use_strict_resume=False):
     torch.set_float32_matmul_precision("medium")
 
     # ------------------ Config ------------------
-    batch_size = 256
+    batch_size = 512
     num_epochs = 400
-    lr = 1e-4
+    lr = 1e-3
     seq_len = 17
     NUM_BINS = 201
     NUM_MECH_TYPES = 17
@@ -142,12 +142,13 @@ def train(checkpoint_path=None, use_strict_resume=False):
         "tgt_seq_len": seq_len,
         "d_model": 512,
         "h": 8,
-        "N": 6,
+        "N": 1,
         "num_labels": NUM_MECH_TYPES,
         "vocab_size": vocab_size,
         "img_patch": 8,
         "dropout": 0.1,
         "pad_token_id": PAD_TOKEN,
+        "debug": False,
     }
 
     model = SingleImageTransformerCLIP_LLaMA(
@@ -159,6 +160,7 @@ def train(checkpoint_path=None, use_strict_resume=False):
         vocab_size=model_config["vocab_size"],
         dropout=model_config["dropout"],
         pad_token_id=model_config["pad_token_id"],
+        debug=model_config["debug"],
     ).to(device)
 
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
