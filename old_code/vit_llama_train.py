@@ -1,0 +1,627 @@
+import os
+import math
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import random_split, DistributedSampler, DataLoader
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from tqdm import tqdm
+import wandb
+
+from vit_llama_model import SingleImageTransformerCLIP_LLaMA
+from dataset import BarLinkageDataset
+
+
+# =========================================================
+# CoordinateBinner (for continuous MSE monitoring)
+# =========================================================
+class CoordinateBinner:
+    def __init__(self, kappa=1.0, num_bins=200):
+        self.kappa = kappa
+        self.num_bins = num_bins
+        self.bin_edges = np.linspace(-kappa, kappa, num_bins + 1)
+        self.bin_centers = (self.bin_edges[:-1] + self.bin_edges[1:]) / 2
+
+    def bin_to_value_torch(self, bin_index_tensor):
+        bin_index_tensor = torch.clamp(bin_index_tensor, 0, self.num_bins - 1)
+        bin_centers_tensor = torch.tensor(
+            self.bin_centers, device=bin_index_tensor.device, dtype=torch.float32
+        )
+        return bin_centers_tensor[bin_index_tensor]
+
+
+# =========================================================
+# BinDistanceLoss (Gaussian soft targets for bin tokens)
+# =========================================================
+class BinDistanceLoss(nn.Module):
+    def __init__(
+        self,
+        vocab_size,
+        bin_start_id,
+        bin_end_id,
+        ignore_index=2,
+        temperature=2.0,
+        bin_weight=10.0,
+        debug=False,
+    ):
+        """
+        Args:
+            vocab_size: total vocab size
+            bin_start_id: first bin token id (inclusive)
+            bin_end_id: last bin token id (inclusive)
+            ignore_index: token id to ignore (e.g., PAD)
+            temperature: Gaussian sigma (in bins)
+            bin_weight: multiplicative weight for bin-token loss
+        """
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.bin_start_id = bin_start_id
+        self.bin_end_id = bin_end_id
+        self.num_bins = bin_end_id - bin_start_id + 1
+        self.ignore_index = ignore_index
+        self.temperature = temperature
+        self.bin_weight = bin_weight
+        self.debug = debug
+
+        self.ce_loss = nn.CrossEntropyLoss(
+            reduction="none",
+            ignore_index=ignore_index,
+        )
+
+    def _create_soft_targets(self, true_bins):
+        """
+        true_bins: (N,) bin indices in [0, num_bins-1]
+        Returns soft targets of shape (N, num_bins) with Gaussian weights.
+        """
+        N = true_bins.size(0)
+        C = self.num_bins
+        device = true_bins.device
+
+        indices = torch.arange(C, device=device).unsqueeze(0)   # (1, C)
+        true_exp = true_bins.unsqueeze(1).float()               # (N, 1)
+        dist = torch.abs(indices - true_exp)                    # (N, C)
+
+        soft = torch.exp(-dist.pow(2) / (2 * self.temperature ** 2))
+        soft = soft / soft.sum(dim=1, keepdim=True)
+        return soft
+
+    def forward(self, logits_flat, targets_flat):
+        """
+        logits_flat: (N, V)
+        targets_flat: (N,)
+        """
+        N, V = logits_flat.shape
+
+        valid_mask = targets_flat != self.ignore_index
+        print(targets_flat)
+        is_bin = (
+            (targets_flat >= self.bin_start_id)
+            & (targets_flat <= self.bin_end_id)
+            & valid_mask
+        )
+        is_not_bin = valid_mask & (~is_bin)
+
+        print(is_bin)
+        print(is_not_bin)
+        print("-----")
+        loss = torch.zeros(N, device=logits_flat.device)
+
+        # -------- BIN TOKENS: Gaussian soft targets --------
+        if is_bin.any():
+            idx = torch.where(is_bin)[0]
+            sel_logits = logits_flat[idx][:, self.bin_start_id:self.bin_end_id + 1]
+            sel_targets = targets_flat[idx] - self.bin_start_id  # to [0, num_bins-1]
+
+            soft = self._create_soft_targets(sel_targets)
+            log_probs = F.log_softmax(sel_logits, dim=1)
+            bin_loss = -(soft * log_probs).sum(dim=1)
+
+            loss[idx] = bin_loss * self.bin_weight
+
+        # -------- NON-BIN TOKENS: standard CE --------
+        if is_not_bin.any():
+            ce_all = self.ce_loss(logits_flat, targets_flat)
+            loss[is_not_bin] = ce_all[is_not_bin]
+
+        if valid_mask.any():
+            return loss[valid_mask].mean()
+        return loss.mean()
+
+
+# =========================================================
+# Debug Function (optional)
+# =========================================================
+def debug_batch(
+    logits,           # (B, T, V)
+    targets,          # (B, T)
+    BIN_START,
+    BIN_END,
+    PAD_TOKEN,
+    loss_fn,
+    max_print=20,
+):
+    if dist.is_initialized() and dist.get_rank() != 0:
+        return
+
+    B, T, V = logits.shape
+    logits_flat = logits.reshape(B * T, V)
+    targets_flat = targets.reshape(B * T)
+
+    print("\n================ DEBUG BATCH ================\n")
+    print(f"Logits shape:        {logits.shape}")
+    print(f"Targets shape:       {targets.shape}")
+    print(f"Flattened N = {B*T}")
+
+    is_pad = targets_flat == PAD_TOKEN
+    is_bin = (
+        (targets_flat >= BIN_START)
+        & (targets_flat <= BIN_END)
+        & (~is_pad)
+    )
+    is_not_bin = (~is_bin) & (~is_pad)
+
+    print(f"PAD tokens:          {is_pad.sum().item()}")
+    print(f"BIN tokens:          {is_bin.sum().item()}")
+    print(f"NON-BIN tokens:      {is_not_bin.sum().item()}")
+
+    print("\n--- First tokens ---")
+    for i in range(min(max_print, len(targets_flat))):
+        tok = targets_flat[i].item()
+        if is_pad[i]:
+            tag = "PAD"
+        elif is_bin[i]:
+            tag = "BIN"
+        else:
+            tag = "NON-BIN"
+        print(f"[{i:03d}] token={tok:4d} | {tag}")
+
+    bin_idx = torch.where(is_bin)[0]
+    if len(bin_idx) > 0:
+        print("\n--- BIN TOKEN DETAILS ---")
+        sel_logits = logits_flat[bin_idx][:, BIN_START:BIN_END + 1]
+        sel_targets = targets_flat[bin_idx] - BIN_START
+
+        soft = loss_fn._create_soft_targets(sel_targets)
+        log_probs = torch.log_softmax(sel_logits, dim=1)
+        bin_loss = -(soft * log_probs).sum(dim=1)
+
+        for j in range(min(5, len(bin_idx))):
+            idx = bin_idx[j].item()
+            print(f"\n[Flat idx {idx}]")
+            print(f"  raw target id     = {targets_flat[idx].item()}")
+            print(f"  rel bin index     = {sel_targets[j].item()}")
+            print(f"  soft[:5]          = {soft[j].cpu().numpy()}")
+            print(f"  loss              = {bin_loss[j].item():.6f}")
+
+    non_idx = torch.where(is_not_bin)[0]
+    if len(non_idx) > 0:
+        print("\n--- NON-BIN TOKEN CE DETAILS ---")
+        ce_all = loss_fn.ce_loss(logits_flat, targets_flat)
+        for j in range(min(5, len(non_idx))):
+            idx = non_idx[j].item()
+            print(
+                f"[Flat idx {idx}] token={targets_flat[idx].item()} "
+                f"loss={ce_all[idx].item():.6f}"
+            )
+
+    print("\n============= END DEBUG BATCH =============\n")
+
+
+# =========================================================
+# DDP utils
+# =========================================================
+def setup_ddp():
+    if not dist.is_initialized():
+        dist.init_process_group("nccl")
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+    return local_rank
+
+
+def cleanup_ddp():
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def get_rank():
+    return dist.get_rank() if dist.is_initialized() else 0
+
+
+# =========================================================
+# Checkpoint
+# =========================================================
+def save_best_checkpoint(
+    model, optimizer, epoch, best_loss, batch_size, lr, model_config,
+    save_dir="./weights"
+):
+    os.makedirs(save_dir, exist_ok=True)
+    d_model = model_config["d_model"]
+    n_heads = model_config["h"]
+    n_layers = model_config["N"]
+
+    checkpoint_path = os.path.join(
+        save_dir,
+        f"CLIP_LLAMA_BinLoss_d{d_model}_h{n_heads}_n{n_layers}_bs{batch_size}_lr{lr}_best.pth"
+    )
+
+    torch.save(
+        {
+            "model_state_dict": model.module.state_dict() if isinstance(model, DDP) else model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "epoch": epoch,
+            "best_loss": best_loss,
+            "model_config": model_config,
+        },
+        checkpoint_path,
+    )
+    print(f"[Rank {get_rank()}] ✅ Saved best model at {checkpoint_path} (Val Loss: {best_loss:.6f})")
+
+
+# =========================================================
+# Metric helper (acc + discrete & continuous MSE)
+# =========================================================
+def compute_metrics(logits, targets, BIN_START, NUM_BINS, PAD_TOKEN, binner):
+    """
+    logits: (B, T, V)
+    targets: (B, T)
+    """
+    preds = logits.argmax(dim=-1)         # (B, T)
+    valid_mask = targets != PAD_TOKEN
+
+    correct = ((preds == targets) & valid_mask).sum().float()
+    token_acc = correct / (valid_mask.sum().float() + 1e-12)
+
+    pred_bin_rel = preds - BIN_START
+    target_bin_rel = targets - BIN_START
+
+    coord_mask = (
+        (target_bin_rel >= 0) &
+        (target_bin_rel < NUM_BINS) &
+        (targets != PAD_TOKEN)
+    )
+
+    if coord_mask.sum() == 0:
+        return {
+            "token_acc": token_acc.item(),
+            "bin_mse": 0.0,
+            "coord_mse": 0.0,
+        }
+
+    # Discrete MSE over bin indices
+    bin_diff = (pred_bin_rel[coord_mask] - target_bin_rel[coord_mask]).float()
+    bin_mse = (bin_diff ** 2).mean().item()
+
+    # Continuous MSE via CoordinateBinner
+    pred_cont = binner.bin_to_value_torch(pred_bin_rel.clamp(0, NUM_BINS - 1))
+    target_cont = binner.bin_to_value_torch(target_bin_rel.clamp(0, NUM_BINS - 1))
+    coord_mse = F.mse_loss(pred_cont[coord_mask], target_cont[coord_mask]).item()
+
+    return {
+        "token_acc": token_acc.item(),
+        "bin_mse": bin_mse,
+        "coord_mse": coord_mse,
+    }
+
+
+# =========================================================
+# Training Loop
+# =========================================================
+def train(checkpoint_path=None, use_strict_resume=False):
+    local_rank = setup_ddp()
+    rank = get_rank()
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    device = torch.device(f"cuda:{local_rank}")
+
+    print(f"[Rank {rank}] Using device {device}")
+    torch.set_float32_matmul_precision("medium")
+
+    # ------------------ Config ------------------
+    batch_size = 2
+    num_epochs = 400
+    lr = 1e-3
+    seq_len = 17
+
+    NUM_BINS = 201
+    NUM_MECH_TYPES = 17
+    NUM_SPECIAL_TOKENS = 3
+    PAD_TOKEN = 2
+    BIN_START = NUM_SPECIAL_TOKENS
+    VOCAB_SIZE = NUM_SPECIAL_TOKENS + NUM_BINS
+    BIN_END = VOCAB_SIZE - 1
+
+    # ------------------ Dataset ------------------
+    dataset = BarLinkageDataset(data_dir="/home/anurizada/Documents/processed_dataset_17")
+
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+
+    train_sampler = DistributedSampler(
+        train_dataset, num_replicas=world_size, rank=rank, shuffle=True
+    )
+    val_sampler = DistributedSampler(
+        val_dataset, num_replicas=world_size, rank=rank, shuffle=False
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        sampler=train_sampler,
+        batch_size=batch_size,
+        num_workers=4,
+        pin_memory=True,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        sampler=val_sampler,
+        batch_size=batch_size,
+        num_workers=4,
+        pin_memory=True,
+    )
+
+    # ------------------ Model ------------------
+    model_config = {
+        "tgt_seq_len": seq_len,
+        "d_model": 256,
+        "h": 8,
+        "N": 6,
+        "num_labels": NUM_MECH_TYPES,
+        "vocab_size": VOCAB_SIZE,
+        "img_patch": 8,
+        "dropout": 0.1,
+        "pad_token_id": PAD_TOKEN,
+        "debug": False,
+    }
+
+    model = SingleImageTransformerCLIP_LLaMA(
+        tgt_seq_len=model_config["tgt_seq_len"],
+        d_model=model_config["d_model"],
+        h=model_config["h"],
+        N=model_config["N"],
+        num_labels=model_config["num_labels"],
+        vocab_size=model_config["vocab_size"],
+        dropout=model_config["dropout"],
+        pad_token_id=model_config["pad_token_id"],
+        debug=model_config["debug"],
+    ).to(device)
+
+    model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
+
+    # ------------------ Loss ------------------
+    loss_fn = BinDistanceLoss(
+        vocab_size=VOCAB_SIZE,
+        bin_start_id=BIN_START,
+        bin_end_id=BIN_END,
+        ignore_index=PAD_TOKEN,
+        temperature=2.0,
+        bin_weight=10.0,
+        debug=False,
+    )
+
+    # ------------------ Binner for coord MSE ------------------
+    binner = CoordinateBinner(kappa=1.0, num_bins=NUM_BINS)
+
+    # ------------------ Optimizer + Scheduler ------------------
+    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+
+    warmup_epochs = 0
+    if warmup_epochs > 0:
+        warmup = LinearLR(
+            optimizer,
+            start_factor=0.1,
+            end_factor=1.0,
+            total_iters=warmup_epochs,
+        )
+        cosine = CosineAnnealingLR(
+            optimizer,
+            T_max=num_epochs - warmup_epochs,
+        )
+        scheduler = SequentialLR(
+            optimizer,
+            schedulers=[warmup, cosine],
+            milestones=[warmup_epochs],
+        )
+    else:
+        scheduler = None
+
+    best_loss = float("inf")
+    start_epoch = 0
+
+    # ------------------ WandB ------------------
+    if rank == 0:
+        wandb.init(
+            project="bar-linkage-transformer",
+            name=f"CLIP_LLAMA_BinLoss_d{model_config['d_model']}_h{model_config['h']}_n{model_config['N']}_bs{batch_size}_lr{lr}",
+            config=model_config,
+        )
+
+    # ------------------ Resume ------------------
+    if checkpoint_path is not None and os.path.exists(checkpoint_path):
+        ckpt = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_epoch = ckpt.get("epoch", 0) + 1
+        best_loss = ckpt.get("best_loss", float("inf"))
+        if rank == 0:
+            print(f"[Rank {rank}] 🔁 Resumed from {checkpoint_path} at epoch {start_epoch}")
+
+    # =========================================================
+    # Training Epochs
+    # =========================================================
+    for epoch in range(start_epoch, num_epochs):
+        model.train()
+        train_sampler.set_epoch(epoch)
+
+        epoch_loss = 0.0
+        epoch_acc = 0.0
+        epoch_bin_mse = 0.0
+        epoch_coord_mse = 0.0
+
+        pbar = tqdm(
+            train_loader,
+            desc=f"[Rank {rank}] Train {epoch}",
+            disable=(rank != 0),
+        )
+
+        for batch_i, batch in enumerate(pbar):
+            decoder_input = batch["decoder_input_discrete"].to(device)
+            decoder_mask = batch["causal_mask"].to(device).bool()
+            images = batch["images"].to(device)
+            mech_labels = batch["encoded_labels"].to(device)
+            targets = batch["labels_discrete"].to(device)
+
+            optimizer.zero_grad(set_to_none=True)
+
+            logits = model(decoder_input, decoder_mask, images, mech_labels)
+            B, T, V = logits.shape
+            logits_flat = logits.reshape(B * T, V)
+            targets_flat = targets.reshape(B * T)
+
+            # Optional debug on very first batch
+            if epoch == 0 and batch_i == 0 and rank == 0:
+                debug_batch(
+                    logits,
+                    targets,
+                    BIN_START,
+                    BIN_END,
+                    PAD_TOKEN,
+                    loss_fn,
+                    max_print=30,
+                )
+
+            loss = loss_fn(logits_flat, targets_flat)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+
+            metrics = compute_metrics(
+                logits,
+                targets,
+                BIN_START,
+                NUM_BINS,
+                PAD_TOKEN,
+                binner,
+            )
+
+            epoch_loss += loss.item()
+            epoch_acc += metrics["token_acc"]
+            epoch_bin_mse += metrics["bin_mse"]
+            epoch_coord_mse += metrics["coord_mse"]
+
+            if rank == 0:
+                wandb.log({
+                    "train/total_loss": loss.item(),
+                    "train/token_acc": metrics["token_acc"],
+                    "train/bin_mse": metrics["bin_mse"],
+                    "train/coord_mse": metrics["coord_mse"],
+                    "epoch": epoch,
+                })
+
+            pbar.set_postfix({
+                "loss": loss.item(),
+                "acc": metrics["token_acc"],
+                "bin_mse": metrics["bin_mse"],
+                "coord_mse": metrics["coord_mse"],
+            })
+
+        pbar.close()
+
+        if scheduler is not None:
+            scheduler.step()
+
+        # ------------------ Validation ------------------
+        model.eval()
+        val_loss = 0.0
+        val_acc = 0.0
+        val_bin_mse = 0.0
+        val_coord_mse = 0.0
+
+        with torch.no_grad():
+            pbar = tqdm(
+                val_loader,
+                desc=f"[Rank {rank}] Val {epoch}",
+                disable=(rank != 0),
+            )
+            for batch in pbar:
+                decoder_input = batch["decoder_input_discrete"].to(device)
+                decoder_mask = batch["causal_mask"].to(device).bool()
+                images = batch["images"].to(device)
+                mech_labels = batch["encoded_labels"].to(device)
+                targets = batch["labels_discrete"].to(device)
+
+                logits = model(decoder_input, decoder_mask, images, mech_labels)
+                B, T, V = logits.shape
+                logits_flat = logits.reshape(B * T, V)
+                targets_flat = targets.reshape(B * T)
+
+                loss = loss_fn(logits_flat, targets_flat)
+                val_loss += loss.item()
+
+                metrics = compute_metrics(
+                    logits,
+                    targets,
+                    BIN_START,
+                    NUM_BINS,
+                    PAD_TOKEN,
+                    binner,
+                )
+                val_acc += metrics["token_acc"]
+                val_bin_mse += metrics["bin_mse"]
+                val_coord_mse += metrics["coord_mse"]
+
+                pbar.set_postfix({
+                    "val_loss": loss.item(),
+                    "val_acc": metrics["token_acc"],
+                })
+
+            pbar.close()
+
+        # --------- Aggregate epoch metrics ---------
+        n_train = len(train_loader)
+        n_val = len(val_loader)
+
+        avg_train_loss = epoch_loss / n_train
+        avg_train_acc = epoch_acc / n_train
+        avg_train_bin_mse = epoch_bin_mse / n_train
+        avg_train_coord_mse = epoch_coord_mse / n_train
+
+        avg_val_loss = val_loss / n_val
+        avg_val_acc = val_acc / n_val
+        avg_val_bin_mse = val_bin_mse / n_val
+        avg_val_coord_mse = val_coord_mse / n_val
+
+        if rank == 0:
+            print(
+                f"[Epoch {epoch}] "
+                f"TrainLoss={avg_train_loss:.4f} | TrainAcc={avg_train_acc:.4f} | "
+                f"TrainBinMSE={avg_train_bin_mse:.6f} | TrainCoordMSE={avg_train_coord_mse:.6f} || "
+                f"ValLoss={avg_val_loss:.4f} | ValAcc={avg_val_acc:.4f} | "
+                f"ValBinMSE={avg_val_bin_mse:.6f} | ValCoordMSE={avg_val_coord_mse:.6f}"
+            )
+
+            wandb.log({
+                "epoch/train_loss": avg_train_loss,
+                "epoch/train_acc": avg_train_acc,
+                "epoch/train_bin_mse": avg_train_bin_mse,
+                "epoch/train_coord_mse": avg_train_coord_mse,
+                "epoch/val_loss": avg_val_loss,
+                "epoch/val_acc": avg_val_acc,
+                "epoch/val_bin_mse": avg_val_bin_mse,
+                "epoch/val_coord_mse": avg_val_coord_mse,
+                "epoch": epoch,
+            })
+
+            if avg_val_loss < best_loss:
+                best_loss = avg_val_loss
+                save_best_checkpoint(
+                    model, optimizer, epoch, best_loss, batch_size, lr, model_config
+                )
+
+    cleanup_ddp()
+
+
+if __name__ == "__main__":
+    train(checkpoint_path=None, use_strict_resume=False)
