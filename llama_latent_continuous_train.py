@@ -5,7 +5,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DistributedSampler, DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from tqdm import tqdm
 import wandb
 
@@ -173,7 +173,18 @@ def train(checkpoint_path=None, use_strict_resume=False):
     # ---------------- OPTIMIZER & LOSS ----------------
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.0001)
     criterion = MechanismRegressionLoss(stop_weight=1.0)
-    scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs)
+
+    # Scheduler with Warmup
+    warmup_epochs = 50
+    scheduler_warmup = LinearLR(
+        optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs
+    )
+    scheduler_cosine = CosineAnnealingLR(optimizer, T_max=num_epochs - warmup_epochs)
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[scheduler_warmup, scheduler_cosine],
+        milestones=[warmup_epochs],
+    )
 
     # ---------------- WandB ----------------
     if rank == 0:
@@ -261,7 +272,14 @@ def train(checkpoint_path=None, use_strict_resume=False):
                 preds = preds[:, :8, :]
 
                 _, mse_part, _ = criterion(preds, targets, attn_mask)
-                euc_err = compute_euclidean_error(preds, targets, attn_mask)
+
+                # Denormalize for Euclidean Error (Raw mm units)
+                preds_denorm = val_dataset.denormalize(preds)
+                targets_denorm = val_dataset.denormalize(targets)
+
+                euc_err = compute_euclidean_error(
+                    preds_denorm, targets_denorm, attn_mask
+                )
 
                 val_mse += mse_part.item()
                 val_euc += euc_err

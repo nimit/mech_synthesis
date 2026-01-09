@@ -14,8 +14,12 @@ def _init_weights(m):
 class ContinuousInputEmbeddings(nn.Module):
     def __init__(self, d_model: int):
         super().__init__()
-        # Projects (x, y) coordinates to d_model
-        self.proj = nn.Linear(2, d_model)
+        # Projects (x, y) coordinates to d_model via MLP
+        self.proj = nn.Sequential(
+            nn.Linear(2, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model)
+        )
 
     def forward(self, x):
         # x shape: (B, T, 2)

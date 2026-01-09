@@ -22,9 +22,8 @@ class BarLinkageDataset(Dataset):
         self.vae_mu = data_dict.get("vae_mu")
 
         # Stats should only be for the 2D coordinates (x, y)
-        # not needed for pre-normalized data
-        # self.mean = mean if mean is not None else 0.0
-        # self.std = std if std is not None else 1.0
+        self.mean = mean if mean is not None else np.zeros((2,), dtype=np.float32)
+        self.std = std if std is not None else np.ones((2,), dtype=np.float32)
 
     def _process_continuous_data(self, data, mask):
         """
@@ -88,56 +87,71 @@ class BarLinkageDataset(Dataset):
         train_set_raw = {k: v[train_idx] for k, v in raw_data.items()}
         val_set_raw = {k: v[val_idx] for k, v in raw_data.items()}
 
-        # 3. Calculate Stats with Masking
-        # mean, std = cls.calculate_stats(
-        #     train_set_raw["inputs"], train_set_raw["labels"], train_set_raw["attn_mask"]
-        # )
+        # 3. Calculate Stats with Masking (on Train set only)
+        mean, std = cls.calculate_stats(
+            train_set_raw["inputs"], train_set_raw["labels"], train_set_raw["attn_mask"]
+        )
+        print(f"Computed Normalization Stats from Train Set:\n  Mean: {mean}\n  Std:  {std}")
 
-        return cls(train_set_raw), cls(val_set_raw)
+        return cls(train_set_raw, mean=mean, std=std), cls(val_set_raw, mean=mean, std=std)
 
-    # @staticmethod
-    # def calculate_stats(inputs, labels, attn_mask):
-    #     """
-    #     Calculate mean/std only for valid (non-padded) joints.
-    #     """
-    #     # Reshape to (B, 8, 2) to separate x and y
-    #     in_coords = inputs.reshape(-1, 8, 2)
-    #     lab_coords = labels.reshape(-1, 8, 2)
-    #     pool = np.concatenate([in_coords, lab_coords], axis=0)  # (2*B, 8, 2)
+    @staticmethod
+    def calculate_stats(inputs, labels, attn_mask):
+        """
+        Calculate mean/std only for valid (non-padded) joints.
+        """
+        # Reshape to (B, 8, 2) to separate x and y
+        in_coords = inputs.reshape(-1, 8, 2)
+        lab_coords = labels.reshape(-1, 8, 2)
+        pool = np.concatenate([in_coords, lab_coords], axis=0)  # (2*B, 8, 2)
 
-    #     # Duplicate mask for the pool
-    #     mask_pool = np.concatenate([attn_mask, attn_mask], axis=0)  # (2*B, 8)
+        # Duplicate mask for the pool
+        mask_pool = np.concatenate([attn_mask, attn_mask], axis=0)  # (2*B, 8)
 
-    #     # Apply mask: keep only valid joints
-    #     # valid_coords shape: (Total_Valid_Joints, 2)
-    #     valid_coords = pool[mask_pool]
+        # Apply mask: keep only valid joints
+        # valid_coords shape: (Total_Valid_Joints, 2)
+        valid_coords = pool[mask_pool]
 
-    #     mean = np.mean(valid_coords, axis=0)  # [mean_x, mean_y]
-    #     std = np.std(valid_coords, axis=0)  # [std_x, std_y]
+        mean = np.mean(valid_coords, axis=0)  # [mean_x, mean_y]
+        std = np.std(valid_coords, axis=0)  # [std_x, std_y]
 
-    #     return mean, std
+        return mean, std
 
-    # def _normalize(self, x):
-    #     """
-    #     x: (8, 3) tensor
-    #     We only normalize the first two columns (x, y).
-    #     The 3rd column is the stop bit and stays 0 or 1.
-    #     """
-    #     x_norm = x.copy()
-    #     x_norm[:, :2] = (x[:, :2] - self.mean) / (self.std + 1e-8)
-    #     return x_norm
+    def _normalize(self, x):
+        """
+        x: (8, 3) tensor
+        We only normalize the first two columns (x, y).
+        The 3rd column is the stop bit and stays 0 or 1.
+        """
+        x_norm = x.copy()
+        x_norm[:, :2] = (x[:, :2] - self.mean) / (self.std + 1e-8)
+        return x_norm
+
+    def denormalize(self, x):
+        """
+        x: (..., 3) tensor or numpy array
+        Denormalizes the first two columns (x, y).
+        """
+        is_tensor = isinstance(x, torch.Tensor)
+        if is_tensor:
+            device = x.device
+            mean = torch.tensor(self.mean, device=device, dtype=x.dtype)
+            std = torch.tensor(self.std, device=device, dtype=x.dtype)
+            x_denorm = x.clone()
+            x_denorm[..., :2] = x[..., :2] * (std + 1e-8) + mean
+            return x_denorm
+        else:
+            x_denorm = x.copy()
+            x_denorm[..., :2] = x[..., :2] * (self.std + 1e-8) + self.mean
+            return x_denorm
 
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, idx):
         # Normalize only the coordinate part of the (8, 3) array
-        # dec_in = self._normalize(self.raw_inputs[idx])
-        # targets = self._normalize(self.raw_labels[idx])
-
-        # skip normalization for pre-normalized data
-        dec_in = self.raw_inputs[idx]
-        targets = self.raw_labels[idx]
+        dec_in = self._normalize(self.raw_inputs[idx])
+        targets = self._normalize(self.raw_labels[idx])
 
         sample = {
             "images": torch.tensor(self.images[idx], dtype=torch.float32),
