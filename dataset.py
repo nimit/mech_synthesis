@@ -4,6 +4,7 @@ import numpy as np
 import json
 import os
 
+
 class BarLinkageDataset(Dataset):
     def __init__(self, data_dir):
         self.data_dir = data_dir
@@ -32,7 +33,7 @@ class BarLinkageDataset(Dataset):
         # ----------------------------
         # Load label mapping
         # ----------------------------
-        with open(f"{data_dir}/label_mapping.json", 'r') as f:
+        with open(f"{data_dir}/label_mapping.json", "r") as f:
             self.label_mapping = json.load(f)
 
         # ----------------------------
@@ -47,7 +48,9 @@ class BarLinkageDataset(Dataset):
             ("encoded_labels", self.encoded_labels),
         ]:
             if len(arr) != n:
-                raise ValueError(f"❌ Length mismatch: {name} has {len(arr)} samples, but images have {n}")
+                raise ValueError(
+                    f"❌ Length mismatch: {name} has {len(arr)} samples, but images have {n}"
+                )
 
         if self.vae_mu is not None and len(self.vae_mu) != n:
             raise ValueError(
@@ -62,12 +65,18 @@ class BarLinkageDataset(Dataset):
     def __getitem__(self, idx):
         sample = {
             "images": torch.tensor(self.images[idx], dtype=torch.float32),
-            "decoder_input_discrete": torch.tensor(self.decoder_input_discrete[idx], dtype=torch.long),
-            "labels_discrete": torch.tensor(self.labels_discrete[idx], dtype=torch.long),
+            "decoder_input_discrete": torch.tensor(
+                self.decoder_input_discrete[idx], dtype=torch.long
+            ),
+            "labels_discrete": torch.tensor(
+                self.labels_discrete[idx], dtype=torch.long
+            ),
             "attention_mask": torch.tensor(self.attention_masks[idx], dtype=torch.bool),
             "causal_mask": torch.tensor(self.causal_masks[idx], dtype=torch.bool),
             "encoded_labels": torch.tensor(self.encoded_labels[idx], dtype=torch.long),
-            "indices": torch.tensor(idx, dtype=torch.long),  # <-- added index for alignment
+            "indices": torch.tensor(
+                idx, dtype=torch.long
+            ),  # <-- added index for alignment
         }
 
         # Only include vae_mu if available

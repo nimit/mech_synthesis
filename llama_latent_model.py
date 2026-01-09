@@ -57,11 +57,11 @@ class SingleLatentToken(nn.Module):
         """
         latent_vec: (B, latent_dim)
         """
-        if latent_vec.dim() == 3:   # safety
+        if latent_vec.dim() == 3:  # safety
             latent_vec = latent_vec.squeeze(-1)  # (B, 50)
 
-        x = self.proj(latent_vec)     # (B, d_model)
-        x = x.unsqueeze(1)            # (B, 1, d_model)
+        x = self.proj(latent_vec)  # (B, d_model)
+        x = x.unsqueeze(1)  # (B, 1, d_model)
         x = x + self.latent_type
         return self.norm(x)
 
@@ -77,7 +77,7 @@ class LatentLLaMA_SingleToken(nn.Module):
 
     def __init__(
         self,
-        latent_dim: int,               # should be 50
+        latent_dim: int,  # should be 50
         tgt_seq_len: int = 25,
         vocab_size: int = 204,
         d_model: int = 512,
@@ -115,7 +115,7 @@ class LatentLLaMA_SingleToken(nn.Module):
             hidden_act="silu",
             use_cache=False,
             pad_token_id=2,
-            bos_token_id=0,   # SOS
+            bos_token_id=0,  # SOS
             eos_token_id=1,
         )
 
@@ -141,16 +141,19 @@ class LatentLLaMA_SingleToken(nn.Module):
         device = decoder_input_ids.device
 
         # ---- latent ----
-        lat_tok = self.latent_token(latent_vec)     # (B, 1, D)
-        if self.debug: print("latent:", lat_tok.shape)
+        lat_tok = self.latent_token(latent_vec)  # (B, 1, D)
+        if self.debug:
+            print("latent:", lat_tok.shape)
 
         # ---- mech ----
         mech_tok = self.mech_embed(mech_labels).unsqueeze(1)  # (B, 1, D)
-        if self.debug: print("mech:", mech_tok.shape)
+        if self.debug:
+            print("mech:", mech_tok.shape)
 
         # ---- targets ----
         tgt_emb = self.tgt_embed(decoder_input_ids)  # (B, T, D)
-        if self.debug: print("targets:", tgt_emb.shape)
+        if self.debug:
+            print("targets:", tgt_emb.shape)
 
         pos_ids = torch.arange(T + 1, device=device).unsqueeze(0)
         mech_tok = mech_tok + self.tgt_pos(pos_ids[:, :1])
@@ -165,7 +168,7 @@ class LatentLLaMA_SingleToken(nn.Module):
         hidden = out.last_hidden_state
 
         # skip latent + mech → get target token outputs
-        dec_out = hidden[:, 2:, :]     # (B, T, D)
-        logits = self.proj(dec_out)    # (B, T, V)
+        dec_out = hidden[:, 2:, :]  # (B, T, D)
+        logits = self.proj(dec_out)  # (B, T, V)
 
         return logits
