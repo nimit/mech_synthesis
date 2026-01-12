@@ -1,0 +1,114 @@
+# MODEL ARCHITECTURE SUMMARY
+
+## Overview
+A LLaMA-based Transformer decoder model for synthesizing mechanical linkage joint paths. The model takes a latent representation of a desired motion curve and mechanism type, then autoregressively generates (x, y) joint coordinates with a stop bit to determine the number of joints.
+
+## Input Processing
+
+### 1. Latent Token
+- VAE-encoded latent vector of dimension 50
+- Projected through MLP: Linear(50 → 512) → ReLU → Dropout → Linear(512 → 512)
+- Added modality embedding + LayerNorm → Single token (B, 1, 512)
+
+### 2. Mechanism Type Embedding
+- 17 mechanism classes
+- nn.Embedding(17, 512) → positional encoding → Single token (B, 1, 512)
+
+### 3. Coordinate Fourier Features
+- Raw (x, y) coordinates are transformed using Fourier Feature Embeddings
+- Uses 32 logarithmically-spaced frequencies: 2^0, 2^1, ..., 2^31
+- For each coordinate: sin(2^k * π * x) and cos(2^k * π * x) for k=0..31
+- Results in 128-dim features per joint: 2 coords × 32 freqs × 2 (sin/cos)
+- Projected via MLP: Linear(128 → 512) → ReLU → Linear(512 → 512)
+
+### 4. Data Normalization
+- Input coordinates are normalized: (x - mean) / std
+- Mean is approximately 0 (centered data)
+- Statistics computed only over valid (non-padded) joints from training set
+
+## Transformer Architecture
+
+### Sequence Structure
+[Latent Token] + [Mechanism Token] + [SOS Token] + [Joint1, Joint2, ..., JointN]
+
+### LLaMA Decoder
+- Hidden size: 512
+- Attention heads: 8
+- Layers: 6
+- Intermediate size: 2048
+- Activation: SiLU
+- Attention dropout: 0.1
+- RMS Layer Normalization
+
+## Output Head
+- Linear(512 → 3) predicting:
+  1. x-coordinate (normalized)
+  2. y-coordinate (normalized)
+  3. Stop logit (determines if this is the last joint)
+
+### Stop Bit Mechanism
+- Binary classifier trained with BCE loss
+- Stop=1 indicates the last valid joint in the sequence
+- Allows variable-length outputs (4-8 joints per mechanism)
+- Attention mask invalidates predictions after stop token
+
+## Loss Function
+Combined loss: MSE(coordinates) + BCE(stop_bit)
+- Coordinate MSE computed only on valid joints (masked)
+- Stop BCE computed only on valid joints (masked)
+
+---
+
+# AI IMAGE GENERATOR PROMPT
+
+Create a detailed technical diagram showing a neural network architecture for mechanical linkage path synthesis. 
+
+**Overall Layout:**
+The diagram flows from left to right, showing input processing, transformer processing, and output generation.
+
+**Left Section - Input Processing:**
+Show three parallel input branches:
+
+1. **Latent Vector Branch (Top):**
+   - A small box labeled "Latent z (50-dim)" 
+   - Arrow to "MLP Projection"
+   - Arrow to a single colored token labeled "Latent Token"
+
+2. **Mechanism Type Branch (Middle):**
+   - A small box labeled "Mechanism Type (1-17)"
+   - Arrow to "Embedding Layer"
+   - Arrow to a single colored token labeled "Mech Token"
+
+3. **Coordinate Input Branch (Bottom) - HIGHLIGHT THIS:**
+   - Show raw (x, y) coordinate pairs as small dots on a 2D grid
+   - Large arrow labeled "Fourier Feature Encoding" pointing to a visualization showing:
+     * Multiple sine waves of increasing frequency (show 4-5 waves)
+     * sin/cos symbols
+     * The formula: sin(2^k · π · x), cos(2^k · π · x)
+   - Text: "32 frequencies × 2 (sin/cos) × 2 coords = 128 dim"
+   - Arrow to "MLP Projection"
+   - Arrow to multiple colored tokens labeled "Joint Tokens"
+
+**Also include a small annotation box showing:**
+- "Data Normalized: μ ≈ 0, σ = std"
+- Small distribution curve centered at zero
+
+**Center Section - Transformer:**
+- Show stacked transformer decoder layers (6 layers)
+- Label as "LLaMA Decoder"
+- Show the token sequence: [Latent][Mech][SOS][J1][J2]...[Jn]
+- Indicate causal attention mask with a triangular shading
+
+**Right Section - Output:**
+- Show the output head projecting to 3 values per position
+- Label the 3 outputs: "x", "y", "STOP"
+- Show a visualization of the stop bit mechanism:
+  * A sequence of joints with the last one having a highlighted "STOP=1"
+  * Text: "Variable length: 4-8 joints per mechanism"
+
+**Style Guidelines:**
+- Clean, technical diagram style with a dark or white background
+- Use consistent color coding (e.g., blue for embeddings, orange for Fourier, green for outputs)
+- Include mathematical notation where appropriate
+- Modern, publication-quality appearance
+- Include small mechanism sketches (bar linkages) near the input/output for context

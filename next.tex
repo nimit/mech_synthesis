@@ -1,0 +1,63 @@
+\documentclass[11pt]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{enumitem}
+
+\geometry{margin=1in}
+
+\title{\textbf{Toward Continuous Coordinate Prediction in Transformer-Based Linkage Synthesis}}
+\author{Nimit Shah}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Motivation}
+
+Our discretized Transformer treats joint coordinate prediction as classification over 200 spatial bins. While stable and effective, this formulation imposes an artificial restriction in the form of a fixed resolution ceiling and fails to capture the true continuity of mechanism geometry. We propose a continuous regression formulation that directly predicts floating-point $(x, y)$ coordinates, enabling arbitrary precision and smoother optimization landscapes.
+
+\section{Core Challenges}
+\begin{enumerate}
+    \item Spectral Bias: Projecting raw 2D coordinates to high-dimensional embeddings via linear layers constrains inputs to a 2D hyperplane, limiting the model's ability to learn complex geometric relationships. Neural networks inherently favor low-frequency functions~\cite{tancik2020fourier}, struggling with the intricate curvature of valid mechanism paths.
+
+    \item Overfitting: Unlike classification (which learns probability regions), regression must predict exact values. High-capacity models ($d_{\text{model}}=512$) aggressively memorize training noise rather than the underlying geometric manifold and as a result, validation loss diverges after 15-50 epochs.
+
+    \item Variable-Length Outputs: Mechanisms contain 4-8 joints. The model must jointly predict coordinates and a stop bit.
+\end{enumerate}
+
+\section{Approach}
+
+Following Tancik et al.~\cite{tancik2020fourier}, we encode coordinates via:
+\begin{equation}
+\gamma(v) = \left[\sin(2\pi \mathbf{B}^\top v),\, \cos(2\pi \mathbf{B}^\top v)\right], \quad \mathbf{B} \sim \mathcal{N}(0, \sigma^2)
+\end{equation}
+With $m=256$ frequencies, this yields 512-dimensional features matching $d_{\text{model}}$. The scale parameter $\sigma$ controls the learnable frequency spectrum—tuned to avoid encoding high-frequency noise. Interestingly, LinkD~\cite{jadhav2026linkd} also applies Fourier transforms to coordinate inputs, acknowledging the insufficiency of raw two-dimensional scalars for conveying mechanism geometry.
+
+A LLaMA-style causal decoder processes the sequence:
+$[\texttt{Latent}] + [\texttt{Mech}] + [\texttt{SOS}] + [\texttt{Joint}_1, \ldots, \texttt{Joint}_n]$
+where the latent token encodes a VAE-compressed target curve, and mechanism type is a learned embedding. The output head predicts $(x, y, \text{stop})$ per position.
+
+We employ MSE loss for coordinates and BCE for stop prediction, masked to valid joints only. Using Huber loss instead of MSE is also considered, mirroring LinkD's approach~\cite{jadhav2026linkd}.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.85\textwidth]{model_architecture.png}
+    \caption{Continuous model architecture (created with Gemini): coordinates are transformed via Gaussian Fourier Features, combined with conditioning tokens, and processed by a causal Transformer to predict $(x, y, \text{stop})$.}
+    \label{fig:architecture}
+\end{figure}
+
+\section{Outlook}
+
+This continuous formulation removes the resolution ceiling of discretization while maintaining autoregressive generation.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}
