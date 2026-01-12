@@ -11,19 +11,47 @@ def _init_weights(m):
             nn.init.zeros_(m.bias)  # type: ignore
 
 
-class ContinuousInputEmbeddings(nn.Module):
-    def __init__(self, d_model: int):
+class FourierFeatureEmbedding(nn.Module):
+    """
+    Fourier Features using LINEAR frequency bands (1, 2, 3, ..., n).
+    """
+    def __init__(self, num_freqs=8, scale=1.0):
         super().__init__()
-        # Projects (x, y) coordinates to d_model via MLP
+        self.num_freqs = num_freqs
+        self.scale = scale
+        # Linear frequencies: 1, 2, 3, ..., num_freqs
+        self.register_buffer("freq_bands", torch.arange(1, num_freqs + 1).float())
+
+    def forward(self, x):
+        # x: (..., 2)
+        # (..., 2, 1) * (num_freqs,) -> (..., 2, num_freqs)
+        x_proj = x.unsqueeze(-1) * self.freq_bands * self.scale
+        
+        # Concatenate sin and cos: (..., 2, num_freqs*2)
+        x_enc = torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
+        
+        # Flatten: (..., 2 * num_freqs * 2) = (..., 128)
+        return x_enc.flatten(start_dim=-2)
+
+
+class ContinuousInputEmbeddings(nn.Module):
+    def __init__(self, d_model: int, num_freqs: int = 32, **kwargs):
+        super().__init__()
+        # Deterministic Fourier Features: (x,y) -> 128 dim
+        self.fourier = FourierFeatureEmbedding(num_freqs=num_freqs)
+        input_dim = 2 * num_freqs * 2  # 2 coords * num_freqs * 2 (sin/cos)
+
+        # Projects high-dim features to d_model via MLP
         self.proj = nn.Sequential(
-            nn.Linear(2, d_model),
+            nn.Linear(input_dim, d_model),
             nn.ReLU(),
             nn.Linear(d_model, d_model)
         )
 
     def forward(self, x):
         # x shape: (B, T, 2)
-        return self.proj(x)
+        features = self.fourier(x)
+        return self.proj(features)
 
 
 # ------------------------------------------------------------
@@ -72,12 +100,14 @@ class LatentLLaMA_Continuous(nn.Module):
         num_layers: int = 6,
         num_labels: int = 17,
         dropout: float = 0.1,
+        num_freqs: int = 256,
+        sigma: float = 1.0,
     ):
         super().__init__()
         self.d_model = d_model
 
-        # 1. Input Projection for (x, y) pairs
-        self.tgt_embed = ContinuousInputEmbeddings(d_model)
+        # 1. Input Projection for (x, y) pairs using Gaussian RFF
+        self.tgt_embed = ContinuousInputEmbeddings(d_model, num_freqs=num_freqs, sigma=sigma)
 
         # 2. Learnable SOS token (represents the start of a mechanism)
         self.sos_token = nn.Parameter(torch.randn(1, 1, d_model))
@@ -95,6 +125,7 @@ class LatentLLaMA_Continuous(nn.Module):
             rms_norm_eps=1e-6,
             hidden_act="silu",
             use_cache=False,
+            attention_dropout=dropout,
         )
         self.llama = LlamaModel(llama_cfg)
 

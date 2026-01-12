@@ -93,15 +93,15 @@ def compute_euclidean_error(preds, targets, mask):
 class MechanismRegressionLoss(nn.Module):
     def __init__(self, stop_weight=1.0):
         super().__init__()
-        self.mse = nn.MSELoss(reduction="none")
+        self.huber = nn.HuberLoss(reduction="none", delta=1.0)
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.stop_weight = stop_weight
 
     def forward(self, preds, targets, mask):
         # preds: (B, 8, 3), targets: (B, 8, 3), mask: (B, 8)
 
-        # 1. Coordinate Loss (MSE)
-        coord_loss = self.mse(preds[..., :2], targets[..., :2]).mean(dim=-1)  # (B, 8)
+        # 1. Coordinate Loss (Huber)
+        coord_loss = self.huber(preds[..., :2], targets[..., :2]).mean(dim=-1)  # (B, 8)
         coord_loss = (coord_loss * mask).sum() / mask.sum()
 
         # 2. Stop Bit Loss (BCE)
@@ -125,7 +125,7 @@ def train(checkpoint_path=None, use_strict_resume=False):
 
     # ---------------- CONFIG ----------------
     batch_size = 512
-    num_epochs = 1000
+    num_epochs = 2000
     lr = 5e-4
     LATENT_DIM = 50
 
@@ -165,17 +165,18 @@ def train(checkpoint_path=None, use_strict_resume=False):
         "num_layers": 6,
         "num_labels": 17,
         "dropout": 0.1,
+        "num_freqs": 32,
     }
 
     model = LatentLLaMA_Continuous(**model_config).to(device)
     # model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     # ---------------- OPTIMIZER & LOSS ----------------
-    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.0001)
+    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.001)
     criterion = MechanismRegressionLoss(stop_weight=1.0)
 
-    # Scheduler with Warmup
-    warmup_epochs = 50
+    # Scheduler with Warmup (5% of total epochs)
+    warmup_epochs = int(num_epochs * 0.05)
     scheduler_warmup = LinearLR(
         optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs
     )
@@ -211,7 +212,7 @@ def train(checkpoint_path=None, use_strict_resume=False):
     for epoch in range(start_epoch, num_epochs):
         model.train()
         train_sampler.set_epoch(epoch)
-        epoch_mse, epoch_bce = 0.0, 0.0
+        epoch_loss, epoch_bce = 0.0, 0.0
 
         pbar = tqdm(train_loader, disable=(rank != 0), desc=f"Train {epoch}")
 
@@ -232,33 +233,33 @@ def train(checkpoint_path=None, use_strict_resume=False):
             preds = preds[:, :8, :]  # Match target length
 
             # Loss
-            loss, mse_part, bce_part = criterion(preds, targets, attn_mask)
+            loss, reg_loss, bce_part = criterion(preds, targets, attn_mask)
 
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
-            epoch_mse += mse_part.item()
+            epoch_loss += reg_loss.item()
             epoch_bce += bce_part.item()
 
             if rank == 0:
                 wandb.log(
                     {
                         "train/total_loss": loss.item(),
-                        "train/coord_mse": mse_part.item(),
+                        "train/reg_loss": reg_loss.item(),
                         "train/stop_bce": bce_part.item(),
                         "train/lr": optimizer.param_groups[0]["lr"],
                     }
                 )
                 pbar.set_postfix(
-                    {"MSE": f"{mse_part.item():.5f}", "BCE": f"{bce_part.item():.5f}"}
+                    {"LOSS": f"{reg_loss.item():.5f}", "BCE": f"{bce_part.item():.5f}"}
                 )
 
         scheduler.step()
 
         # ---------------- VALIDATION ----------------
         model.eval()
-        val_mse, val_euc = 0.0, 0.0
+        val_loss, val_euc = 0.0, 0.0
 
         with torch.no_grad():
             for batch in val_loader:
@@ -271,7 +272,7 @@ def train(checkpoint_path=None, use_strict_resume=False):
                 preds = model(dec_in, attn_mask, latents, mech_labels)
                 preds = preds[:, :8, :]
 
-                _, mse_part, _ = criterion(preds, targets, attn_mask)
+                _, reg_loss, _ = criterion(preds, targets, attn_mask)
 
                 # Denormalize for Euclidean Error (Raw mm units)
                 preds_denorm = val_dataset.denormalize(preds)
@@ -281,20 +282,22 @@ def train(checkpoint_path=None, use_strict_resume=False):
                     preds_denorm, targets_denorm, attn_mask
                 )
 
-                val_mse += mse_part.item()
+                val_loss += reg_loss.item()
                 val_euc += euc_err
 
-        avg_val_mse = val_mse / len(val_loader)
+        avg_val_loss = val_loss / len(val_loader)
         avg_val_euc = val_euc / len(val_loader)
 
         if rank == 0:
             print(
-                f"Epoch {epoch} | Val MSE: {avg_val_mse:.6f} | Val Euc Err: {avg_val_euc:.4f}"
+                f"Epoch {epoch} | Train loss: {reg_loss:.6f} | Val loss: {avg_val_loss:.6f} | Val Euc Err: {avg_val_euc:.4f}"
             )
-            wandb.log({"epoch/val_mse": avg_val_mse, "epoch/val_euc_err": avg_val_euc})
+            wandb.log(
+                {"epoch/val_loss": avg_val_loss, "epoch/val_euc_err": avg_val_euc}
+            )
 
-            if avg_val_mse < best_loss:
-                best_loss = avg_val_mse
+            if avg_val_loss < best_loss:
+                best_loss = avg_val_loss
                 save_best_checkpoint(
                     model, optimizer, epoch, best_loss, batch_size, lr, model_config
                 )
