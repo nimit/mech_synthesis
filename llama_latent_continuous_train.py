@@ -8,6 +8,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from tqdm import tqdm
 import wandb
+from datetime import datetime
 
 from llama_latent_continuous import LatentLLaMA_Continuous
 from dataset_continuous import BarLinkageDataset
@@ -33,6 +34,14 @@ def get_rank():
     return dist.get_rank() if dist.is_initialized() else 0
 
 
+def get_name(cfg, bs, lr):
+    d_model = cfg["d_model"]
+    n_heads = cfg["num_heads"]
+    n_layers = cfg["num_layers"]
+    num_freqs = cfg["num_freqs"]
+    return f"LATENT_LLAMA_CONT_d{d_model}_nf{num_freqs}_h{n_heads}_n{n_layers}_bs{bs}_lr{lr}"
+
+
 # =========================================================
 # Checkpoint
 # =========================================================
@@ -47,13 +56,10 @@ def save_best_checkpoint(
     save_dir="./weights",
 ):
     os.makedirs(save_dir, exist_ok=True)
-    d_model = model_config["d_model"]
-    n_heads = model_config["num_heads"]
-    n_layers = model_config["num_layers"]
 
     path = os.path.join(
         save_dir,
-        f"LATENT_LLAMA_CONT_d{d_model}_h{n_heads}_n{n_layers}_bs{batch_size}_lr{lr}_best.pth",
+        f"{get_name(model_config, batch_size, lr)}.pth",
     )
     torch.save(
         {
@@ -124,8 +130,9 @@ def train(checkpoint_path=None, use_strict_resume=False):
     torch.set_float32_matmul_precision("medium")
 
     # ---------------- CONFIG ----------------
-    batch_size = 512
     num_epochs = 2000
+    warmup_epochs = 100
+    batch_size = 512
     lr = 5e-4
     LATENT_DIM = 50
 
@@ -159,13 +166,13 @@ def train(checkpoint_path=None, use_strict_resume=False):
     # ---------------- MODEL ----------------
     model_config = {
         "latent_dim": LATENT_DIM,
-        "tgt_seq_len": 8,  # Now 8 joint pairs
+        "tgt_seq_len": 8,  # 8 joint pairs
         "d_model": 512,
         "num_heads": 8,
         "num_layers": 6,
         "num_labels": 17,
         "dropout": 0.1,
-        "num_freqs": 32,
+        "num_freqs": 128,
     }
 
     model = LatentLLaMA_Continuous(**model_config).to(device)
@@ -175,8 +182,7 @@ def train(checkpoint_path=None, use_strict_resume=False):
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.001)
     criterion = MechanismRegressionLoss(stop_weight=1.0)
 
-    # Scheduler with Warmup (5% of total epochs)
-    warmup_epochs = int(num_epochs * 0.05)
+    # Scheduler with Warmup
     scheduler_warmup = LinearLR(
         optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs
     )
@@ -190,9 +196,10 @@ def train(checkpoint_path=None, use_strict_resume=False):
     # ---------------- WandB ----------------
     if rank == 0:
         wandb.init(
-            project="bar-linkage-transformer",
-            name=f"LATENT_LLaMA_Continuous_Reg",
+            project="path_synthesis",
+            name=f"LATENT_LLaMA_Continuous_{datetime.now().isoformat(timespec='minutes')}",
             config=model_config,
+            notes=f"num_epochs={num_epochs}, warmup={warmup_epochs}, batch_size={batch_size}, lr: {lr}",
         )
 
     best_loss = float("inf")
@@ -290,7 +297,7 @@ def train(checkpoint_path=None, use_strict_resume=False):
 
         if rank == 0:
             print(
-                f"Epoch {epoch} | Train loss: {reg_loss:.6f} | Val loss: {avg_val_loss:.6f} | Val Euc Err: {avg_val_euc:.4f}"
+                f"Epoch {epoch} | Train loss: {epoch_loss / len(train_loader):.6f} | Val loss: {avg_val_loss:.6f} | Val Euc Err: {avg_val_euc:.4f}"
             )
             wandb.log(
                 {"epoch/val_loss": avg_val_loss, "epoch/val_euc_err": avg_val_euc}
