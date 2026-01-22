@@ -392,15 +392,15 @@ def create_npy_files(dataset, output_dir, vae_checkpoint, latent_dim=50):
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     dataset = ImageLinkageDataset(
-        root_dir="/home/anurizada/Documents/bar_linkages",
-        max_joints=8,
+        root_dir="/home/anurizada/Documents/bar_linkages_33",
+        max_joints=12,
         num_bins=200
     )
 
-    output_dir = "/home/anurizada/Documents/processed_dataset_17"
+    output_dir = "/home/anurizada/Documents/processed_dataset_33"
     vae_checkpoint = "./weights/lat_50.ckpt"
 
-    inspect_dataset_with_latents(dataset, vae_checkpoint, latent_dim=50, num_samples=5)
+    inspect_dataset_with_latents(dataset, vae_checkpoint, latent_dim=50, num_samples=20)
 
     response = input("\nDo you want to proceed with creating .npy files (including VAE latents)? (y/n): ")
     if response.lower() == 'y':
