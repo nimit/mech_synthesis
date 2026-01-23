@@ -6,8 +6,6 @@ from torch.utils.data import DataLoader
 import numpy as np
 from llama_latent_continuous import LatentLLaMA_Continuous
 from dataset import BarLinkageDataset 
-import matplotlib.pyplot as plt
-torch.set_float32_matmul_precision('medium')
 from sklearn.neighbors import NearestNeighbors
 
 from dataset_generation.curve_plot import get_pca_inclination, rotate_curve
@@ -20,18 +18,19 @@ import json
 import torch.nn.functional as F
 from tslearn.metrics import dtw_path
 
+torch.set_float32_matmul_precision('medium')
 device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 
 # Headless simulator version
 index = 0 # local server index 
-API_ENDPOINT = f"http://localhost:4001/simulation"
+API_ENDPOINT = f"http://localhost:4000/simulation"
 HEADERS = {"Content-Type": "application/json"}
 speedscale = 1
 steps = 360
 minsteps = int(steps*20/360)
 
-checkpoint_path = "./weights/test.pth"
-data_dir = "/home/anurizada/Documents/processed_dataset_17"
+checkpoint_path = "weights/LATENT_LLAMA_CONT_d512_nf512_h8_n6_bs512_lr0.0005.pth"
+data_dir = "dataset_17mechs"
 batch_size = 1
 
 # Note: Dataset loading might not be strictly needed if we load NPY files directly, 
@@ -41,6 +40,7 @@ dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
 checkpoint = torch.load(checkpoint_path, map_location=device)
 model_config = checkpoint['model_config']
+print("Model Config freqs:", model_config["num_freqs"])
 
 # Initialize model
 model = LatentLLaMA_Continuous(
@@ -50,6 +50,8 @@ model = LatentLLaMA_Continuous(
     num_layers=model_config["num_layers"],
     num_labels=model_config["num_labels"],
     latent_dim=model_config["latent_dim"],
+    num_freqs=model_config["num_freqs"],
+    log_scale=model_config.get("log_scale", False),
 ).to(device)
 
 # Load weights
@@ -64,16 +66,13 @@ NUM_MECH_TYPES = 17
 LATENT_DIM = 50
 tgt_seq_len = 17
 
-FIXED_TEMPERATURE = 0.0
-TOP_K = None
-
 # Paths
-latent_path = "/home/anurizada/Documents/processed_dataset_17/vae_mu.npy"
-labels_cont_path = "/home/anurizada/Documents/processed_dataset_17/labels_continuous.npy"
-encoded_labels_path = "/home/anurizada/Documents/processed_dataset_17/encoded_labels.npy"
+latent_path = f"{data_dir}/vae_mu.npy"
+labels_cont_path = f"{data_dir}/labels_continuous.npy"
+encoded_labels_path = f"{data_dir}/encoded_labels.npy"
 
-label_mapping_path = "/home/anurizada/Documents/processed_dataset_17/label_mapping.json"
-coupler_mapping_path = "/home/anurizada/Documents/transformer/BSIdict.json"
+label_mapping_path = f"{data_dir}/label_mapping.json"
+coupler_mapping_path = "BSIdict.json"
 
 # GLOBAL statistics
 GLOBAL_DTW_VALUES = []
@@ -101,7 +100,6 @@ def coupler_index_for(mech_type: str) -> int:
 
 def safe_name(name: str, max_len=30):
     return "".join([(c if c.isalnum() else "_") for c in name])[:max_len] or "unk"
-
 
 @torch.no_grad()
 def generate_mechanism(
@@ -367,7 +365,7 @@ def process_one_curve():
 # =========================================================
 def main():
 
-    NUM_SAMPLES = 2  # adjust as needed (e.g., 100)
+    NUM_SAMPLES = 100  # adjust as needed (e.g., 100)
 
     for _ in range(NUM_SAMPLES):
         process_one_curve()

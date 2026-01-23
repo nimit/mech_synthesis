@@ -130,8 +130,8 @@ def train(checkpoint_path=None, use_strict_resume=False):
     torch.set_float32_matmul_precision("medium")
 
     # ---------------- CONFIG ----------------
-    num_epochs = 2000
-    warmup_epochs = 100
+    num_epochs = 500
+    warmup_epochs = 50
     batch_size = 512
     lr = 5e-4
     LATENT_DIM = 50
@@ -172,7 +172,8 @@ def train(checkpoint_path=None, use_strict_resume=False):
         "num_layers": 6,
         "num_labels": 17,
         "dropout": 0.1,
-        "num_freqs": 128,
+        "num_freqs": 9,
+        "log_scale": True,
     }
 
     model = LatentLLaMA_Continuous(**model_config).to(device)
