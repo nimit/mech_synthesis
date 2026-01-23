@@ -26,13 +26,13 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 # Headless simulator version
 index = 0  # local server index
-API_ENDPOINT = "http://localhost:4001/simulation"
+API_ENDPOINT = "http://localhost:4000/simulation"
 HEADERS = {"Content-Type": "application/json"}
 speedscale = 1
 steps = 360
 minsteps = int(steps * 20 / 360)
 
-checkpoint_path = "weights/LATENT_LLAMA_CONT_d512_h8_n6_bs512_lr0.0005_best.pth"
+checkpoint_path = "weights/LATENT_LLAMA_CONT_d512_nf512_h8_n6_bs512_lr0.0005.pth"
 data_dir = "dataset_17mechs"
 batch_size = 1
 
@@ -47,6 +47,8 @@ model = LatentLLaMA_Continuous(
     num_layers=model_config["num_layers"],
     num_labels=model_config["num_labels"],
     latent_dim=model_config["latent_dim"],
+    num_freqs=model_config["num_freqs"],
+    log_scale=model_config.get("log_scale", False),
 ).to(device)
 
 # Load weights
@@ -446,7 +448,6 @@ def process_one_curve():
             device,  # type: ignore
             tgt_seq_len,
         )
-        print("GENERATED MECHANISM:", pred_points)
 
         Pp = simulate_curve(pred_points, mech_name)
         if Pp is None or Pp.shape[0] < minsteps:

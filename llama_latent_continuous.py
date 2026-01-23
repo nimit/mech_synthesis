@@ -13,14 +13,18 @@ def _init_weights(m):
 
 class FourierFeatureEmbedding(nn.Module):
     """
-    Fourier Features using LINEAR frequency bands (1, 2, 3, ..., n).
+    Fourier Features using either LINEAR or LOG-SPACED (exponential) frequency bands.
     """
-    def __init__(self, num_freqs=8, scale=1.0):
+    def __init__(self, num_freqs=8, scale=1.0, log_scale=False):
         super().__init__()
         self.num_freqs = num_freqs
         self.scale = scale
-        # Linear frequencies: 1, 2, 3, ..., num_freqs
-        self.register_buffer("freq_bands", torch.arange(1, num_freqs + 1).float())
+        if log_scale:
+            # Frequencies: 2^0, 2^1, ..., 2^(num_freqs-1)
+            self.register_buffer("freq_bands", 2.0 ** torch.arange(num_freqs))
+        else:
+            # Linear frequencies: 1, 2, 3, ..., num_freqs
+            self.register_buffer("freq_bands", torch.arange(1, num_freqs + 1).float())
 
     def forward(self, x):
         # x: (..., 2)
@@ -35,10 +39,10 @@ class FourierFeatureEmbedding(nn.Module):
 
 
 class ContinuousInputEmbeddings(nn.Module):
-    def __init__(self, d_model: int, num_freqs: int = 32, **kwargs):
+    def __init__(self, d_model: int, num_freqs: int = 32, log_scale: bool = False, **kwargs):
         super().__init__()
         # Deterministic Fourier Features: (x,y) -> 128 dim
-        self.fourier = FourierFeatureEmbedding(num_freqs=num_freqs)
+        self.fourier = FourierFeatureEmbedding(num_freqs=num_freqs, log_scale=log_scale)
         input_dim = 2 * num_freqs * 2  # 2 coords * num_freqs * 2 (sin/cos)
 
         # Projects high-dim features to d_model via MLP
@@ -102,12 +106,13 @@ class LatentLLaMA_Continuous(nn.Module):
         dropout: float = 0.1,
         num_freqs: int = 256,
         sigma: float = 1.0,
+        log_scale: bool = False,
     ):
         super().__init__()
         self.d_model = d_model
 
-        # 1. Input Projection for (x, y) pairs using Gaussian RFF
-        self.tgt_embed = ContinuousInputEmbeddings(d_model, num_freqs=num_freqs, sigma=sigma)
+        # 1. Input Projection for (x, y) pairs using Gaussian RFF (or Det)
+        self.tgt_embed = ContinuousInputEmbeddings(d_model, num_freqs=num_freqs, sigma=sigma, log_scale=log_scale)
 
         # 2. Learnable SOS token (represents the start of a mechanism)
         self.sos_token = nn.Parameter(torch.randn(1, 1, d_model))
