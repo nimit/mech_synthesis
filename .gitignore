@@ -10,3 +10,4 @@ ALL_*/
 *.log
 
 dataset_17mechs/
+*results*/
