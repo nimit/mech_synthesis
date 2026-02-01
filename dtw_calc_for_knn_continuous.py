@@ -35,7 +35,7 @@ import argparse
 # =========================================================
 NUM_SAMPLES = 100  # adjust as needed
 NUM_PLOT = 5  # number of best/worst results to plot
-NUM_NEIGHBORS = 32
+NUM_NEIGHBORS = 16
 OUTPUT_DIR = "knn_continuous_results"
 
 # Parse CLI args
@@ -44,12 +44,14 @@ parser.add_argument("--num_samples", type=int, default=NUM_SAMPLES)
 parser.add_argument("--num_plot", type=int, default=NUM_PLOT)
 parser.add_argument("--num_neighbors", type=int, default=NUM_NEIGHBORS)
 parser.add_argument("--output_dir", type=str, default=OUTPUT_DIR)
+parser.add_argument("--num_img_per_plot", type=int, default=0, help="Number of images to plot per query. 0=default behavior, >0=top N best, <0=all")
 args = parser.parse_args()
 
 NUM_SAMPLES = args.num_samples
 NUM_PLOT = args.num_plot
 NUM_NEIGHBORS = args.num_neighbors
 OUTPUT_DIR = args.output_dir
+NUM_IMG_PER_PLOT = args.num_img_per_plot
 
 NUM_MECH_TYPES = 17
 LATENT_DIM = 50
@@ -443,6 +445,8 @@ def process_one_curve(tracker=None, test_indices=None):
     count_2 = 0
     count_3 = 0
     total_generated = 0
+    
+    query_results = []
 
     # Helper to check validity and update stats
     # lat_tensor: tensor of shape (50,)
@@ -504,35 +508,33 @@ def process_one_curve(tracker=None, test_indices=None):
             if dtw_val < 3.0:
                 count_3 += 1
 
-            # Update Best for Query - Keep track of the full packet
-            if dtw_val < best_dtw_query:
-                best_dtw_query = dtw_val
-                best_mech_query = mech_name
-                best_source_query = source_label
-
-                # Transform joints with best variant for storage
-                pred_joints_transformed = apply_variant_to_points(
-                    pred_joints_n, variant_name
-                )
-
-                res = {
+            # Create result packet for POTENTIAL storage
+            current_res_pkt = {
+                "dtw": dtw_val,
+                "metadata": {
                     "query_idx": int(query_idx),
                     "gt_mech": gt_mech_name,
                     "gen_mech": mech_name,
                     "source": source_label,
                     "dtw": dtw_val,
-                }
+                },
+                "gt_curve": gt_curve,
+                "gt_joints": gt_joints_n,
+                "pred_curve": pred_curve_best,
+                "pred_joints": apply_variant_to_points(pred_joints_n, variant_name),
+                "mech_name": mech_name,
+                "variant_name": variant_name,
+            }
 
-                best_res_pkt = {
-                    "dtw": dtw_val,
-                    "metadata": res,
-                    "gt_curve": gt_curve,
-                    "gt_joints": gt_joints_n,
-                    "pred_curve": pred_curve_best,
-                    "pred_joints": pred_joints_transformed,
-                    "mech_name": mech_name,
-                    "variant_name": variant_name,
-                }
+            if NUM_IMG_PER_PLOT != 0:
+                query_results.append(current_res_pkt)
+
+            # Update Best for Query
+            if dtw_val < best_dtw_query:
+                best_dtw_query = dtw_val
+                best_mech_query = mech_name
+                best_source_query = source_label
+                best_res_pkt = current_res_pkt
 
     # 1. Original Latent
     orig_latent_tensor = torch.tensor(query_latent[0], dtype=torch.float32)
@@ -552,9 +554,32 @@ def process_one_curve(tracker=None, test_indices=None):
             f"Query {query_idx} (GT: {gt_mech_name}) | Best: {best_dtw_query:.4f} ({best_mech_query}, {best_source_query}) | <1: {count_1}, <2: {count_2}, <3: {count_3} (Total: {total_generated})"
         )
 
-        # Update Tracker with ONLY the best result for this query
         if tracker is not None:
             tracker.update_with_best_entry(best_res_pkt)
+
+        # Handle Per-Query Plotting
+        if NUM_IMG_PER_PLOT != 0 and query_results:
+            # Sort by DTW
+            query_results.sort(key=lambda x: x["dtw"])
+            
+            # Select subset
+            if NUM_IMG_PER_PLOT > 0:
+                to_plot = query_results[:NUM_IMG_PER_PLOT]
+            else:
+                to_plot = query_results # Plot all if negative
+
+            # Create Directory
+            q_dir = os.path.join(OUTPUT_DIR, f"query_{query_idx}")
+            if os.path.exists(q_dir):
+                shutil.rmtree(q_dir)
+            os.makedirs(q_dir)
+            
+            # Plot
+            for i, res in enumerate(to_plot):
+                # Filename format: dtw_{dtw:.4f}_{mech}_{source}.png
+                fname = f"dtw_{res['dtw']:.4f}_{safe_name(res['mech_name'])}_{safe_name(res['metadata']['source'])}.png"
+                save_path = os.path.join(q_dir, fname)
+                plot_result_pair(res, save_path)
 
         # Return just the best result dictionary (inside a list for compatibility if needed, but we'll adapt main)
         return [best_res_pkt["metadata"]]
