@@ -80,7 +80,7 @@ minsteps = int(steps * 20 / 360)
 # =========================
 # CONFIG
 # =========================
-NUM_SAMPLES = 10
+NUM_SAMPLES = 1
 NUM_ROT_ANGLES = 32
 
 RESAMPLE_N = 360
@@ -90,8 +90,8 @@ CD_SUCCESS_THRESH = 0.01
 DTW_SUCCESS_THRESH = 0.25
 
 # SEARCH CONFIG
-NUM_VARIATIONS = 50
-MAX_ITER = 10
+NUM_VARIATIONS = 1
+MAX_ITER = 1
 NUM_GOOD_THRESH = 3
 SIGMA_INITIAL = 0.1
 DECAY = 0.5
@@ -609,3 +609,25 @@ summarize("QUERY CD", QUERY_CD, CD_SUCCESS_THRESH)
 summarize("QUERY DTW", QUERY_DTW, DTW_SUCCESS_THRESH)
 summarize("SEARCH MEAN CD", SEARCH_MEAN_CD, CD_SUCCESS_THRESH)
 summarize("SEARCH MEAN DTW", SEARCH_MEAN_DTW, DTW_SUCCESS_THRESH)
+
+# RESULTS
+
+# NUM_SAMPLES = 10
+# NUM_VARIATIONS = 50
+# MAX_ITER = 10
+# 139 mins
+# === FINAL METRIC SUMMARY ===
+# QUERY CD | count=10 | mean=0.127135 | median=0.089215 | success(<0.01)=1
+# QUERY DTW | count=10 | mean=1.327858 | median=0.110028 | success(<0.25)=6
+# SEARCH MEAN CD | count=10 | mean=0.023532 | median=0.013452 | success(<0.01)=3
+# SEARCH MEAN DTW | count=10 | mean=0.830527 | median=0.157794 | success(<0.25)=7
+
+# NUM_SAMPLES = 10
+# NUM_VARIATIONS = 100
+# MAX_ITER = 5
+# 107 mins
+# === FINAL METRIC SUMMARY ===
+# QUERY CD | count=10 | mean=0.127135 | median=0.089215 | success(<0.01)=1
+# QUERY DTW | count=10 | mean=1.327858 | median=0.110028 | success(<0.25)=6
+# SEARCH MEAN CD | count=10 | mean=0.023224 | median=0.013570 | success(<0.01)=4
+# SEARCH MEAN DTW | count=10 | mean=0.645297 | median=0.151527 | success(<0.25)=8

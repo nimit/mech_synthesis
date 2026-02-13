@@ -28,7 +28,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # =========================
 # PATHS
 # =========================
-checkpoint_path = "weights/LATENT_LLAMA_CONT_d512_nf128_h8_n6_bs512_lr0.0005.pth"
+checkpoint_path = "weights/latest_LATENT_LLAMA_CONT_d512_nf256_h8_n6_bs512_lr0.0005.pth"
 data_dir = "dataset_17mechs"
 
 OUT_DIR = "results_gt_vs_pred_knn_cd_and_dtw"
@@ -82,7 +82,7 @@ minsteps = int(steps * 20 / 360)
 # CONFIG
 # =========================
 NUM_SAMPLES = 100
-NUM_NEIGHBORS = 30
+NUM_NEIGHBORS = 100
 NUM_ROT_ANGLES = 32
 
 RESAMPLE_N = 360
@@ -439,7 +439,7 @@ for i, batch in enumerate(tqdm(dataloader)):
         plt.axis("equal")
         plt.savefig(
             os.path.join(
-                sample_dir, f"knn_{k:02d}_CD_{cd_nb:.6f}_DTW_{dtw_nb:.6f}.png"
+                sample_dir, f"CD_{cd_nb:.6f}_DTW_{dtw_nb:.6f}_knn_{k:02d}.png"
             ),
             dpi=200,
         )

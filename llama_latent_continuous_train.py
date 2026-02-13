@@ -45,6 +45,37 @@ def get_name(cfg, bs, lr):
 # =========================================================
 # Checkpoint
 # =========================================================
+def save_latest_checkpoint(
+    model,
+    optimizer,
+    epoch,
+    best_loss,
+    batch_size,
+    lr,
+    model_config,
+    save_dir="./weights",
+):
+    os.makedirs(save_dir, exist_ok=True)
+
+    path = os.path.join(
+        save_dir,
+        f"latest_{get_name(model_config, batch_size, lr)}.pth",
+    )
+    torch.save(
+        {
+            "model_state_dict": model.module.state_dict()
+            if isinstance(model, DDP)
+            else model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "epoch": epoch,
+            "best_loss": best_loss,
+            "model_config": model_config,
+        },
+        path,
+    )
+    if get_rank() == 0:
+        print(f"Saved latest model at {path} (Val Loss: {best_loss:.6f})")
+
 def save_best_checkpoint(
     model,
     optimizer,
@@ -130,7 +161,7 @@ def train(checkpoint_path=None, use_strict_resume=False):
     torch.set_float32_matmul_precision("medium")
 
     # ---------------- CONFIG ----------------
-    num_epochs = 500
+    num_epochs = 1000
     warmup_epochs = 50
     batch_size = 512
     lr = 5e-4
@@ -172,8 +203,8 @@ def train(checkpoint_path=None, use_strict_resume=False):
         "num_layers": 6,
         "num_labels": 17,
         "dropout": 0.1,
-        "num_freqs": 9,
-        "log_scale": True,
+        "num_freqs": 256,
+        "log_scale": False,
     }
 
     model = LatentLLaMA_Continuous(**model_config).to(device)
@@ -304,6 +335,9 @@ def train(checkpoint_path=None, use_strict_resume=False):
                 {"epoch/val_loss": avg_val_loss, "epoch/val_euc_err": avg_val_euc}
             )
 
+            save_latest_checkpoint(
+                model, optimizer, epoch, best_loss, batch_size, lr, model_config
+            )
             if avg_val_loss < best_loss:
                 best_loss = avg_val_loss
                 save_best_checkpoint(
