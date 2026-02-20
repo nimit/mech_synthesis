@@ -393,8 +393,10 @@ def train(
     checkpoint_path=None,
     use_strict_resume=False,  # True = exact resume; False = fine-tune from weights only
 ):
-    local_rank = setup_ddp()
-    rank = get_rank()
+    # local_rank = setup_ddp()
+    # rank = get_rank()
+    local_rank = 0
+    rank = 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     device = torch.device(f"cuda:{local_rank}")
 
@@ -405,7 +407,8 @@ def train(
     batch_size = 512
     num_epochs = 1000
     lr = 5e-4
-    seq_len = 17
+    # seq_len = 17
+    seq_len = 25
 
     NUM_BINS = 201
     NUM_SPECIAL = 3
@@ -419,7 +422,7 @@ def train(
     BIN_END = BIN_START + NUM_BINS - 1  # 3 + 201 - 1 = 203  (FIXED)
 
     # ---------------- DATA ----------------
-    dataset = BarLinkageDataset("dataset_17mechs")
+    dataset = BarLinkageDataset("dataset_33mechs")
     train_size = int(0.8 * len(dataset))
     val_size = len(dataset) - train_size
 
@@ -450,10 +453,11 @@ def train(
     # ---------------- MODEL ----------------
     model_config = {
         "tgt_seq_len": seq_len,
-        "d_model": 512,
-        "h": 8,
+        "d_model": 1536,
+        "h": 32,
         "N": 6,
-        "num_labels": 17,
+        # "num_labels": 17,
+        "num_labels": 33,
         "vocab_size": VOCAB_SIZE,
         "latent_dim": LATENT_DIM,
         "dropout": 0.1,
@@ -474,7 +478,7 @@ def train(
         debug=model_config["debug"],
     ).to(device)
 
-    model = DDP(model, device_ids=[local_rank])
+    # model = DDP(model, device_ids=[local_rank])
 
     # ---------------- LOSS ----------------
     loss_fn = BinDistanceLoss(
@@ -509,7 +513,7 @@ def train(
     # ---------------- WandB ----------------
     if rank == 0:
         wandb.init(
-            project="bar-linkage-transformer",
+            project="mech_synthesis_discrete",
             name=f"LATENT_LLaMA_BinLoss_d{model_config['d_model']}_h{model_config['h']}_n{model_config['N']}_bs{batch_size}_lr{lr}",
             config=model_config,
         )
@@ -779,7 +783,7 @@ def train(
                     model, optimizer, epoch, best_loss, batch_size, lr, model_config
                 )
 
-    cleanup_ddp()
+    # cleanup_ddp()
 
 
 if __name__ == "__main__":

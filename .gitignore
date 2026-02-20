@@ -10,4 +10,5 @@ ALL_*/
 *.log
 
 dataset_17mechs/
+dataset_33mechs/
 *results*/

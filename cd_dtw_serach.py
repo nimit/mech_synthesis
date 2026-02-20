@@ -80,7 +80,7 @@ minsteps = int(steps * 20 / 360)
 # =========================
 # CONFIG
 # =========================
-NUM_SAMPLES = 1
+NUM_SAMPLES = 50
 NUM_ROT_ANGLES = 32
 
 RESAMPLE_N = 360
@@ -90,8 +90,8 @@ CD_SUCCESS_THRESH = 0.01
 DTW_SUCCESS_THRESH = 0.25
 
 # SEARCH CONFIG
-NUM_VARIATIONS = 1
-MAX_ITER = 1
+NUM_VARIATIONS = 50
+MAX_ITER = 3
 NUM_GOOD_THRESH = 3
 SIGMA_INITIAL = 0.1
 DECAY = 0.5
@@ -147,7 +147,9 @@ def coupler_index_for(name):
 # =========================
 def simulate_safe(points, mech_name):
     if not isinstance(points, np.ndarray) or points.ndim != 2 or points.shape[1] != 2:
-        print(f"misshapen points arr | {type(points)} | {points.shape if isinstance(points, np.ndarray) else len(points)}")
+        print(
+            f"misshapen points arr | {type(points)} | {points.shape if isinstance(points, np.ndarray) else len(points)}"
+        )
         return None
     pts = np.round(points, 3)
     try:
@@ -209,13 +211,13 @@ def evaluate_latent(latent_vec, gt_curve, gt_rs, seed_latent=None):
     def process_mech_full(item):
         mech_idx_str, mech_name = item
         mech_idx = int(mech_idx_str)
-        
+
         # Predict (Parallel execution)
         try:
             # predict_safe returns (B, T, 2). Here B=1.
-            pred_norm = predict_safe(model, latent_vec, mech_idx) # (1, T, 2)
+            pred_norm = predict_safe(model, latent_vec, mech_idx)  # (1, T, 2)
             if pred_norm.ndim == 3:
-                pred_norm = pred_norm[0] # (T, 2)
+                pred_norm = pred_norm[0]  # (T, 2)
         except Exception as e:
             # print(f"Prediction failed for {mech_name}: {e}")
             return None
@@ -233,9 +235,9 @@ def evaluate_latent(latent_vec, gt_curve, gt_rs, seed_latent=None):
         ci = coupler_index_for(mech_name)
         if ci < 0:
             return None
-        
+
         curve = P[:, ci, :]
-        
+
         # Metrics
         cd, aligned, _ = chamfer_O2_align(gt_curve, curve)
         dtw = min(
@@ -249,23 +251,24 @@ def evaluate_latent(latent_vec, gt_curve, gt_rs, seed_latent=None):
             "cd": cd,
             "dtw": dtw,
             "dist": dist,
-            "curve": aligned, # store aligned curve for plotting
+            "curve": aligned,  # store aligned curve for plotting
             "latent": latent_vec,
-            "mech_idx": mech_idx
+            "mech_idx": mech_idx,
         }
 
     # Parallelize Prediction + Simulation
     from concurrent.futures import ThreadPoolExecutor
-    
+
     # 17 mechanisms -> enough workers
     with ThreadPoolExecutor(max_workers=17) as executor:
         futures = executor.map(process_mech_full, mech_items)
-        
+
         for res in futures:
             if res is not None:
                 results.append(res)
 
     return results
+
 
 # =========================
 # CONTINUOUS GENERATION (AUTOREGRESSIVE)
@@ -470,73 +473,75 @@ for i, batch in enumerate(tqdm(dataloader)):
     plt.close()
 
     # ---------- LATENT SPACE EXPLORATION (SMART FAN) ----------
-    all_search_metrics = [] # List of {'cd': float, 'dtw': float, 'dist': float}
-    
+    all_search_metrics = []  # List of {'cd': float, 'dtw': float, 'dist': float}
+
     current_sigma = SIGMA_INITIAL
-    
+
     # 1. Initial Candidates (Query + Noise)
     # Start with query (index 0)
-    candidates_latents = [latent] 
+    candidates_latents = [latent]
     for _ in range(NUM_VARIATIONS):
         noise = torch.randn_like(latent, device=device) * current_sigma
         candidates_latents.append(latent + noise)
-        
+
     found_good_count = 0
 
     for iteration in range(MAX_ITER):
-        iter_results = [] # Full objects for this iteration
-        
+        iter_results = []  # Full objects for this iteration
+
         iter_dir = os.path.join(sample_dir, f"iter_{iteration}")
         os.makedirs(iter_dir, exist_ok=True)
-        
+
         # Evaluate batch
         for lat_cand in candidates_latents:
             res_list = evaluate_latent(lat_cand, gt_curve, gt_rs, seed_latent=latent)
-            
+
             for res in res_list:
-                res['iter'] = iteration
-                
+                res["iter"] = iteration
+
                 # Metric tracking
-                m = {'cd': res['cd'], 'dtw': res['dtw'], 'dist': res['dist']}
+                m = {"cd": res["cd"], "dtw": res["dtw"], "dist": res["dist"]}
                 all_search_metrics.append(m)
                 iter_results.append(res)
-                
-                if res['cd'] < CD_SUCCESS_THRESH:
+
+                if res["cd"] < CD_SUCCESS_THRESH:
                     found_good_count += 1
-        
+
         # Sort iteration results by CD
-        iter_results.sort(key=lambda x: x['cd'])
+        iter_results.sort(key=lambda x: x["cd"])
         top_winners = iter_results[:5]
 
         # Log & Plot Top 5
         print(f"  [Iter {iteration}] Best results:")
         for rank, res in enumerate(top_winners):
-            print(f"    #{rank+1}: {res['mech']} | CD={res['cd']:.6f} | Dist={res['dist']:.4f}")
-            
+            print(
+                f"    #{rank + 1}: {res['mech']} | CD={res['cd']:.6f} | Dist={res['dist']:.4f}"
+            )
+
             # Plot
-            fname = f"{rank+1}_{safe_name(res['mech'])}_CD_{res['cd']:.4f}_D_{res['dist']:.3f}.png"
+            fname = f"{rank + 1}_{safe_name(res['mech'])}_CD_{res['cd']:.4f}_D_{res['dist']:.3f}.png"
             plt.figure(figsize=(4, 4))
             plt.plot(gt_rs[:, 0], gt_rs[:, 1], "k", lw=2)
-            plt.plot(res['curve'][:, 0], res['curve'][:, 1], "r--", lw=1)
+            plt.plot(res["curve"][:, 0], res["curve"][:, 1], "r--", lw=1)
             plt.axis("equal")
-            plt.title(f"Rank {rank+1} | CD={res['cd']:.4f}")
+            plt.title(f"Rank {rank + 1} | CD={res['cd']:.4f}")
             plt.savefig(os.path.join(iter_dir, fname), dpi=100)
             plt.close()
 
         # Stop conditions
         if found_good_count >= NUM_GOOD_THRESH:
             break
-            
+
         if iteration >= MAX_ITER:
             break
-            
+
         # Refinement: Top 5 spawn new candidates
         candidates_latents = []
         current_sigma *= DECAY
-        
+
         # Generate new variations
         for win in top_winners:
-            base_lat = win['latent']
+            base_lat = win["latent"]
             for _ in range(NUM_VARIATIONS):
                 noise = torch.randn_like(base_lat) * current_sigma
                 candidates_latents.append(base_lat + noise)
@@ -546,9 +551,9 @@ for i, batch in enumerate(tqdm(dataloader)):
 
     if all_search_metrics:
         # Ruggedness Plot
-        dists = [x['dist'] for x in all_search_metrics]
-        cds = [x['cd'] for x in all_search_metrics]
-        
+        dists = [x["dist"] for x in all_search_metrics]
+        cds = [x["cd"] for x in all_search_metrics]
+
         plt.figure(figsize=(6, 5))
         plt.scatter(dists, cds, alpha=0.5, s=10)
         plt.xlabel("Distance from Seed Latent")
@@ -559,11 +564,11 @@ for i, batch in enumerate(tqdm(dataloader)):
         plt.close()
 
         # Collect Top 30 for stats
-        all_search_metrics.sort(key=lambda x: x['cd'])
+        all_search_metrics.sort(key=lambda x: x["cd"])
         top_k = all_search_metrics[:30]
-        
-        search_cds = [x['cd'] for x in top_k]
-        search_dtws = [x['dtw'] for x in top_k]
+
+        search_cds = [x["cd"] for x in top_k]
+        search_dtws = [x["dtw"] for x in top_k]
 
     if len(search_cds) > 0:
         SEARCH_MEAN_CD.append(np.mean(search_cds))
@@ -578,12 +583,18 @@ for i, batch in enumerate(tqdm(dataloader)):
                 "mech": mech_name,
                 "query_cd": float(cd),
                 "query_dtw": float(dtw),
-                "search_mean_cd": None if len(search_cds) == 0 else float(np.mean(search_cds)),
-                "search_min_cd": None if len(search_cds) == 0 else float(np.min(search_cds)),
+                "search_mean_cd": None
+                if len(search_cds) == 0
+                else float(np.mean(search_cds)),
+                "search_min_cd": None
+                if len(search_cds) == 0
+                else float(np.min(search_cds)),
                 "search_mean_dtw": None
                 if len(search_dtws) == 0
                 else float(np.mean(search_dtws)),
-                "search_min_dtw": None if len(search_dtws) == 0 else float(np.min(search_dtws)),
+                "search_min_dtw": None
+                if len(search_dtws) == 0
+                else float(np.min(search_dtws)),
             }
         )
         + "\n"
